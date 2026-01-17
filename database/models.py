@@ -24,3 +24,14 @@ class Keyword(Base):
     platform = Column(String(50))
     count = Column(Integer)
     timestamp = Column(DateTime, default= datetime.utcnow)
+    
+class Article(Base):
+    __tablename__ = 'articles'
+    
+    id = Column(Integer, primary_key=True)
+    title = Column(String(500))
+    url = Column(Text)
+    source = Column(String(200))
+    published_at = Column(DateTime)
+    platform = Column(String(50))  # 'news'
+    timestamp = Column(DateTime, default=datetime.utcnow)  # When we collected it
