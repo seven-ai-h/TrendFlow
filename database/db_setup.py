@@ -11,6 +11,9 @@ def getSession(): # creates connection to the db and return session object to le
     Session = sessionmaker(bind=engine) # returns session class
     return Session()
 
+# Create tables when module is imported
+db_connection()
+
 
 
 
