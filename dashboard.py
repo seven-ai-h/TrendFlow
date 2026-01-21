@@ -7,150 +7,178 @@ import plotly.express as px
 import plotly.graph_objects as go
 from collections import Counter
 
-st.set_page_config(page_title="TrendFlow", page_icon="📊", layout="wide")
+# Page config
+st.set_page_config(
+    page_title="TrendFlow Dashboard",
+    page_icon="🔥",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Simple clean CSS
+# Custom CSS
 st.markdown("""
 <style>
-    .main {background-color: #fafafa; padding: 2rem;}
-    .stPlotlyChart {background: white; padding: 1rem; border-radius: 8px;}
-    div[data-testid="stMetric"] {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 8px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    .main {
+        padding: 0rem 1rem;
+    }
+    .stMetric {
+        background-color: #1E1E1E;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #333;
+    }
+    h1 {
+        color: #FF6B6B;
+        padding-bottom: 20px;
+    }
+    h2 {
+        color: #4ECDC4;
+        padding-top: 20px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Sidebar
-st.sidebar.title("⚙️ Controls")
-days_back = st.sidebar.slider("Time Range (days)", 1, 365, 7)
-min_count = st.sidebar.slider("Min Mentions", 1, 50, 2)
-st.sidebar.divider()
-st.sidebar.caption(f"Updated: {datetime.now().strftime('%H:%M')}")
-
-# Get data
-session = getSession()
-cutoff = datetime.utcnow() - timedelta(days=days_back)
-
 # Header
-st.title("🔥 TrendFlow Analytics")
-st.markdown("Real-time trend detection across Hacker News and news outlets")
-st.markdown("---")
+st.title("🔥 TrendFlow - Real-Time Trend Detection")
+st.markdown("*Tracking trends across Hacker News and major news outlets*")
 
-# Metrics
+# Sidebar
+st.sidebar.header("⚙️ Settings")
+days_back = st.sidebar.slider("📅 Time Range (days)", 1, 365, 7)
+min_keyword_count = st.sidebar.slider("🔢 Min Keyword Frequency", 1, 100, 2)
+refresh = st.sidebar.button("🔄 Refresh Data")
+
+cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+
+# Get session
+session = getSession()
+
+# === METRICS ROW ===
 col1, col2, col3, col4 = st.columns(4)
-stories = session.query(Story).filter(Story.timestamp >= cutoff).count()
-keywords = session.query(Keyword).filter(Story.timestamp >= cutoff).count()
-articles = session.query(Article).filter(Article.timestamp >= cutoff).count()
 
-col1.metric("Stories", f"{stories:,}")
-col2.metric("Keywords", f"{keywords:,}")
-col3.metric("Articles", f"{articles:,}")
-col4.metric("Range", f"{days_back}d")
+total_stories = session.query(Story).filter(Story.timestamp >= cutoff_date).count()
+total_keywords = session.query(Keyword).filter(Keyword.timestamp >= cutoff_date).count()
+total_articles = session.query(Article).filter(Article.timestamp >= cutoff_date).count()
 
-st.markdown("---")
+previous_cutoff = cutoff_date - timedelta(days=days_back)
+prev_stories = session.query(Story).filter(
+    Story.timestamp >= previous_cutoff,
+    Story.timestamp < cutoff_date
+).count()
 
-# Main content - 2 columns
-left, right = st.columns([2, 1])
+growth = ((total_stories - prev_stories) / prev_stories * 100) if prev_stories > 0 else 0
 
-with left:
-    st.subheader("📊 Top Keywords")
+col1.metric("📰 Total Stories", f"{total_stories:,}", f"{growth:+.1f}%")
+col2.metric("🏷️ Unique Keywords", f"{total_keywords:,}")
+col3.metric("📄 News Articles", f"{total_articles:,}")
+col4.metric("⏱️ Data Range", f"{days_back} days")
+
+st.divider()
+
+# === TOP TRENDING KEYWORDS ===
+st.header("📊 Top Trending Keywords")
+
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    keywords_data = session.query(Keyword).filter(
+        Keyword.timestamp >= cutoff_date,
+        Keyword.count >= min_keyword_count
+    ).order_by(Keyword.count.desc()).limit(20).all()
     
-    kw_data = session.query(Keyword).filter(
-        Keyword.timestamp >= cutoff,
-        Keyword.count >= min_count
-    ).order_by(Keyword.count.desc()).limit(15).all()
-    
-    if kw_data:
-        df = pd.DataFrame([
-            {'Keyword': k.keyword, 'Mentions': k.count, 'Platform': k.platform}
-            for k in kw_data
+    if keywords_data:
+        df_keywords = pd.DataFrame([
+            {'Keyword': kw.keyword, 'Count': kw.count, 'Platform': kw.platform}
+            for kw in keywords_data
         ])
         
         fig = px.bar(
-            df, 
-            x='Keyword', 
-            y='Mentions', 
+            df_keywords,
+            x='Keyword',
+            y='Count',
             color='Platform',
-            color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4'},
-            height=400
+            title='Top 20 Keywords by Frequency',
+            color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4'}
         )
         fig.update_layout(
-            plot_bgcolor='white',
-            xaxis_title="",
-            yaxis_title="Mentions",
-            margin=dict(l=40, r=20, t=20, b=40)
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font_color='white'
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No data - run the collector!")
+        st.info("📊 No keyword data available yet. Run the collector!")
 
-with right:
-    st.subheader("🔥 Top 10")
+with col2:
+    st.subheader("🔥 Hot Keywords")
+    if keywords_data:
+        for i, kw in enumerate(keywords_data[:10], 1):
+            emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🔹"
+            st.markdown(f"{emoji} **{kw.keyword}** — {kw.count} mentions")
+    else:
+        st.info("No data yet")
+
+st.divider()
+
+# === KEYWORD TIMELINE ===
+st.header("📈 Keyword Trends Over Time")
+
+all_keywords = session.query(Keyword).filter(
+    Keyword.timestamp >= cutoff_date
+).all()
+
+if all_keywords:
+    timeline_data = []
+    for kw in all_keywords:
+        timeline_data.append({
+            'date': kw.timestamp.date(),
+            'keyword': kw.keyword,
+            'count': kw.count
+        })
     
-    if kw_data:
-        for i, kw in enumerate(kw_data[:10], 1):
-            pct = (kw.count / kw_data[0].count) * 100
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-            
-            st.markdown(f"""
-            <div style='background:white; padding:12px; margin-bottom:8px; border-radius:6px;'>
-                <div style='margin-bottom:4px;'>
-                    <strong>{medal} {kw.keyword}</strong>
-                    <span style='float:right; color:#666;'>{kw.count}</span>
-                </div>
-                <div style='background:#eee; height:6px; border-radius:3px;'>
-                    <div style='background:#FF6B35; width:{pct}%; height:100%; border-radius:3px;'></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-st.markdown("---")
-
-# Timeline
-st.subheader("📈 Trends Over Time")
-
-all_kw = session.query(Keyword).filter(Keyword.timestamp >= cutoff).all()
-
-if all_kw and 'df' in locals():
-    timeline = pd.DataFrame([
-        {'date': k.timestamp.date(), 'keyword': k.keyword, 'count': k.count}
-        for k in all_kw
-    ])
+    df_timeline = pd.DataFrame(timeline_data)
     
-    top5 = df.head(5)['Keyword'].tolist()
-    filtered = timeline[timeline['keyword'].isin(top5)]
-    grouped = filtered.groupby(['date', 'keyword'])['count'].sum().reset_index()
+    top_5_keywords = df_keywords.head(5)['Keyword'].tolist() if 'df_keywords' in locals() else []
     
-    if len(grouped) > 0:
-        fig2 = px.line(grouped, x='date', y='count', color='keyword', markers=True, height=350)
-        fig2.update_layout(
-            plot_bgcolor='white',
-            xaxis_title="Date",
-            yaxis_title="Mentions",
-            margin=dict(l=40, r=20, t=20, b=40)
+    if top_5_keywords:
+        df_filtered = df_timeline[df_timeline['keyword'].isin(top_5_keywords)]
+        df_grouped = df_filtered.groupby(['date', 'keyword'])['count'].sum().reset_index()
+        
+        fig_timeline = px.line(
+            df_grouped,
+            x='date',
+            y='count',
+            color='keyword',
+            title='Top 5 Keywords Over Time',
+            markers=True
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        fig_timeline.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font_color='white',
+            xaxis_title="Date",
+            yaxis_title="Mentions"
+        )
+        st.plotly_chart(fig_timeline, use_container_width=True)
 else:
-    st.info("Timeline needs multiple collections")
+    st.info("📈 Timeline will appear after multiple collection runs")
 
-st.markdown("---")
+st.divider()
 
-# Recent Stories
-st.subheader("📰 Top Stories")
+# === RECENT STORIES ===
+st.header("📰 Recent Hacker News Stories")
 
-stories_list = session.query(Story).filter(
-    Story.timestamp >= cutoff
-).order_by(Story.score.desc()).limit(10).all()
+recent_stories = session.query(Story).filter(
+    Story.timestamp >= cutoff_date
+).order_by(Story.timestamp.desc()).limit(10).all()
 
-if stories_list:
-    for s in stories_list:
-        col1, col2 = st.columns([1, 10])
-        with col1:
-            st.metric("↑", s.score)
-        with col2:
-            st.markdown(f"**{s.title}**")
-            st.caption(f"💬 {s.num_comments} comments • {s.timestamp.strftime('%b %d, %H:%M')}")
-        st.divider()
+for story in recent_stories:
+    with st.expander(f"⬆️ {story.score} | {story.title}"):
+        st.write(f"**Comments:** {story.num_comments}")
+        st.write(f"**Posted:** {story.timestamp.strftime('%Y-%m-%d %H:%M')}")
+        if story.url:
+            st.write(f"**Link:** {story.url}")
+
+# Footer
+st.divider()
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | TrendFlow v1.0")
