@@ -50,8 +50,8 @@ st.markdown("*Tracking trends across Hacker News and major news outlets*")
 
 # Sidebar
 st.sidebar.header("⚙️ Settings")
-days_back = st.sidebar.slider("📅 Time Range (days)", 1, 30, 7)
-min_keyword_count = st.sidebar.slider("🔢 Min Keyword Frequency", 1, 10, 2)
+days_back = st.sidebar.slider("📅 Time Range (days)", 1, 365, 7)
+min_keyword_count = st.sidebar.slider("🔢 Min Keyword Frequency", 1, 100, 2)
 refresh = st.sidebar.button("🔄 Refresh Data")
 
 cutoff_date = datetime.utcnow() - timedelta(days=days_back)
