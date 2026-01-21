@@ -6,7 +6,13 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from collections import Counter
+import os
 
+# Check if database exists
+if not os.path.exists('trendflow.db'):
+    st.warning("⚠️ No data available. This is a demo deployment.")
+    st.info("To see live data, run the collector locally and connect to a cloud database.")
+    st.stop()
 # Page config
 st.set_page_config(
     page_title="TrendFlow Dashboard",
