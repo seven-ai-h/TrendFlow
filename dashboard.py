@@ -94,7 +94,7 @@ with tab_keywords:
             fig = px.bar(
                 df_keywords, x='Keyword', y='Count', color='Platform',
                 title='Top 20 Keywords by Frequency',
-                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4'}
+                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
             )
             fig.update_layout(
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
@@ -311,7 +311,7 @@ with tab_platform:
             fig_pie = px.pie(
                 df_plat, names='Platform', values='Keywords',
                 title='Keyword Distribution by Platform',
-                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4'}
+                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
             )
             fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='white')
             st.plotly_chart(fig_pie, use_container_width=True)
@@ -332,7 +332,7 @@ with tab_platform:
                 top_per_platform, x='keyword', y='count', color='platform',
                 barmode='group',
                 title='Top Keywords per Platform',
-                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4'}
+                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
             )
             fig_plat_bar.update_layout(
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
@@ -347,7 +347,7 @@ with tab_platform:
         fig_area = px.area(
             df_daily_plat, x='date', y='count', color='platform',
             title='Daily Keyword Volume by Platform',
-            color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4'}
+            color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
         )
         fig_area.update_layout(
             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
