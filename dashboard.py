@@ -35,8 +35,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🔥 TrendFlow - Real-Time Trend Detection")
-st.markdown("*Tracking trends across Hacker News and major news outlets*")
+st.title("🔥 TrendFlow — Real-Time Trend Detection & ML Model Lab")
+st.markdown("*Multi-source trend pipeline · 6-model ML comparison · LLM-generated insights*")
 
 # Sidebar
 st.sidebar.header("⚙️ Settings")
@@ -70,10 +70,230 @@ col4.metric("⏱️ Data Range", f"{days_back} days")
 st.divider()
 
 # === TABS ===
-tab_keywords, tab_trending, tab_predictions, tab_platform, tab_stories, tab_insights, tab_pipeline = st.tabs([
-    "📊 Keywords", "⚡ Trending Now", "🤖 AI Predictions", "🌐 Platform Split",
-    "📰 Stories & News", "🧠 AI Insights", "🔧 Pipeline"
+(tab_modellab, tab_predictions, tab_trending, tab_keywords,
+ tab_platform, tab_insights, tab_stories, tab_pipeline) = st.tabs([
+    "🧪 Model Lab", "🤖 Live Predictions", "⚡ Trending Now", "📊 Keywords",
+    "🌐 Platform Split", "🧠 AI Insights", "📰 Stories & News", "🔧 Pipeline"
 ])
+
+
+# ── TAB 0: MODEL LAB (multi-model comparison) ─────────────────────────────────
+with tab_modellab:
+    import plotly.graph_objects as _go
+    from plotly.subplots import make_subplots
+    from analysis.model_lab import train_all_models, MODEL_EXPLANATIONS
+
+    st.header("🧪 Model Lab — Six ML Models, One Task, Lined Up")
+    st.markdown(
+        "**The task:** given how a keyword has behaved so far, *will its mentions "
+        "jump more than 1.3× tomorrow?* Every model below is trained on the **exact "
+        "same** engineered features and test split, so you can compare them fairly — "
+        "who's most accurate, who catches the most real jumps, and where they disagree."
+    )
+
+    MODEL_COLORS = {
+        'Logistic Regression': '#4ECDC4',
+        'Random Forest': '#FF6B35',
+        'Gradient Boosting': '#FFD93D',
+        'SVM (RBF)': '#6E40C9',
+        'K-Nearest Neighbors': '#FF4500',
+        'Neural Net (MLP)': '#3B49DF',
+    }
+
+    col_run, col_note = st.columns([1, 3])
+    with col_run:
+        do_train = st.button("🚀 Train / Retrain All Models", type="primary")
+    with col_note:
+        st.caption("Training runs 6 classifiers with cross-validation. Results are "
+                   "cached until you retrain or reload data.")
+
+    if do_train or 'model_lab_results' not in st.session_state:
+        with st.spinner("Training Logistic Regression, Random Forest, Gradient Boosting, "
+                        "SVM, KNN and a Neural Net…"):
+            st.session_state['model_lab_results'] = train_all_models(session)
+
+    results = st.session_state['model_lab_results']
+
+    if not results.get('ok'):
+        st.warning(f"⚠️ {results.get('error')}")
+        st.info("Run `python seed_data.py` (demo data) or the collector to build a training set.")
+    else:
+        # ── Dataset summary ───────────────────────────────────────────────────
+        bal = results['class_balance']
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("🧾 Training Samples", f"{results['n_samples']:,}")
+        m2.metric("📈 Jump events", f"{bal['jump']:,}")
+        m3.metric("➖ No-jump events", f"{bal['no_jump']:,}")
+        pos_rate = bal['jump'] / max(1, (bal['jump'] + bal['no_jump'])) * 100
+        m4.metric("⚖️ Positive rate", f"{pos_rate:.1f}%")
+
+        lb_df = pd.DataFrame(results['leaderboard'])
+
+        # ── Leaderboard ───────────────────────────────────────────────────────
+        st.subheader("🏆 Leaderboard")
+        st.caption("Ranked by F1 (balance of precision & recall), then ROC-AUC. "
+                   "The winner is highlighted.")
+
+        show_df = lb_df.copy()
+        for c in ['Accuracy', 'Precision', 'Recall', 'F1', 'ROC-AUC', 'CV Acc', 'CV Std']:
+            show_df[c] = show_df[c].map(lambda v: f"{v:.3f}" if pd.notna(v) else "—")
+        show_df['Train (ms)'] = show_df['Train (ms)'].map(lambda v: f"{v:.1f}")
+
+        def _highlight_winner(row):
+            return ['background-color: rgba(78,205,196,0.18)'] * len(row) if row.name == 0 else [''] * len(row)
+
+        st.dataframe(
+            show_df.style.apply(_highlight_winner, axis=1),
+            use_container_width=True, hide_index=True,
+        )
+
+        winner = lb_df.iloc[0]
+        st.success(
+            f"🥇 **Best model: {winner['Model']}** — "
+            f"F1 {winner['F1']:.3f}, ROC-AUC {winner['ROC-AUC']:.3f}, "
+            f"Accuracy {winner['Accuracy']:.3f}. "
+            f"{MODEL_EXPLANATIONS[winner['Model']]['best_for']}"
+        )
+
+        # ── Metric comparison bars + ROC curves ───────────────────────────────
+        col_metrics, col_roc = st.columns(2)
+
+        with col_metrics:
+            st.subheader("📊 Metric Comparison")
+            metric_long = lb_df.melt(
+                id_vars='Model',
+                value_vars=['Accuracy', 'Precision', 'Recall', 'F1'],
+                var_name='Metric', value_name='Score')
+            fig_metrics = px.bar(
+                metric_long, x='Metric', y='Score', color='Model', barmode='group',
+                color_discrete_map=MODEL_COLORS,
+                title='Accuracy · Precision · Recall · F1 (per model)')
+            fig_metrics.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                font_color='white', yaxis=dict(range=[0, 1]),
+                legend=dict(font=dict(size=9)))
+            st.plotly_chart(fig_metrics, use_container_width=True)
+
+        with col_roc:
+            st.subheader("📈 ROC Curves")
+            fig_roc = _go.Figure()
+            fig_roc.add_trace(_go.Scatter(
+                x=[0, 1], y=[0, 1], mode='lines',
+                line=dict(dash='dash', color='gray'), name='Random (0.5)',
+                showlegend=True))
+            for name, rc in results['roc'].items():
+                auc_lbl = f"{rc['auc']:.3f}" if rc['auc'] == rc['auc'] else "—"
+                fig_roc.add_trace(_go.Scatter(
+                    x=rc['fpr'], y=rc['tpr'], mode='lines',
+                    name=f"{name} ({auc_lbl})",
+                    line=dict(color=MODEL_COLORS.get(name), width=2)))
+            fig_roc.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                font_color='white', title='True vs. False Positive Rate (AUC in legend)',
+                xaxis_title='False Positive Rate', yaxis_title='True Positive Rate',
+                legend=dict(font=dict(size=9), yanchor='bottom', y=0.02, xanchor='right', x=0.98))
+            st.plotly_chart(fig_roc, use_container_width=True)
+
+        # ── Confusion matrices grid ───────────────────────────────────────────
+        st.subheader("🔲 Confusion Matrices")
+        st.caption("Rows = actual, columns = predicted. Top-left & bottom-right are correct calls.")
+        conf = results['confusion']
+        names = [r['Model'] for r in results['leaderboard']]
+        cm_cols = st.columns(3)
+        for i, name in enumerate(names):
+            cm = np.array(conf[name])
+            with cm_cols[i % 3]:
+                fig_cm = px.imshow(
+                    cm, text_auto=True, color_continuous_scale='Blues',
+                    labels=dict(x="Predicted", y="Actual", color="Count"),
+                    x=['No Jump', 'Jump'], y=['No Jump', 'Jump'],
+                    title=name)
+                fig_cm.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)', font_color='white',
+                    coloraxis_showscale=False, height=280,
+                    margin=dict(l=10, r=10, t=40, b=10))
+                st.plotly_chart(fig_cm, use_container_width=True)
+
+        # ── Feature importance comparison ─────────────────────────────────────
+        st.subheader("🧩 What Each Model Pays Attention To")
+        st.caption("Feature importance (tree models) / |coefficient| (Logistic Regression), "
+                   "normalized per model. SVM-RBF, KNN and MLP don't expose per-feature "
+                   "importances, so they're omitted here.")
+        fi = results['feature_importance']
+        if fi:
+            fi_rows = []
+            for model_name, feats in fi.items():
+                total = sum(abs(v) for v in feats.values()) or 1.0
+                for feat, val in feats.items():
+                    fi_rows.append({'Model': model_name, 'Feature': feat,
+                                    'Importance': abs(val) / total})
+            fi_df = pd.DataFrame(fi_rows)
+            fig_fi = px.bar(
+                fi_df, x='Feature', y='Importance', color='Model', barmode='group',
+                color_discrete_map=MODEL_COLORS,
+                title='Normalized Feature Importance by Model')
+            fig_fi.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                font_color='white', xaxis_tickangle=-40, legend=dict(font=dict(size=9)))
+            st.plotly_chart(fig_fi, use_container_width=True)
+
+        # ── Cross-model live predictions (the "lined up" view) ────────────────
+        st.subheader("🎯 Live Predictions — Every Model, Side by Side")
+        st.markdown(
+            "Each model's probability (%) that the keyword **jumps tomorrow**, lined up "
+            "so you can see where they **agree** and where they **disagree**. "
+            "`Consensus` is the average; `Agreement` counts how many models vote *jump* (>50%)."
+        )
+        live = results['live']
+        if live is not None and not live.empty:
+            model_names = [r['Model'] for r in results['leaderboard']]
+            display = live.head(15).copy()
+            ordered_cols = (['keyword', 'count', 'velocity'] + model_names +
+                            ['Consensus', 'Agreement'])
+            ordered_cols = [c for c in ordered_cols if c in display.columns]
+            display = display[ordered_cols]
+            display['velocity'] = display['velocity'].round(2)
+
+            def _rg_color(val):
+                """Red (0) → yellow (50) → green (100) without matplotlib."""
+                try:
+                    v = max(0.0, min(100.0, float(val))) / 100.0
+                except (TypeError, ValueError):
+                    return ''
+                if v < 0.5:
+                    r, g = 255, int(200 * (v / 0.5))
+                else:
+                    r, g = int(255 * (1 - (v - 0.5) / 0.5)), 200
+                return f'background-color: rgba({r},{g},70,0.55); color: #111;'
+
+            prob_cols = model_names + ['Consensus']
+            style = (display.style
+                     .map(_rg_color, subset=prob_cols)
+                     .format({c: '{:.1f}' for c in prob_cols}))
+            st.dataframe(style, use_container_width=True, hide_index=True)
+            st.caption("🟢 green = model predicts a jump · 🔴 red = model predicts no jump. "
+                       "Disagreement across a row = genuine model uncertainty on that keyword.")
+        else:
+            st.info("No live keywords to score yet.")
+
+        # ── Model explainer cards ─────────────────────────────────────────────
+        st.subheader("📖 Model Explainer")
+        st.caption("What each algorithm actually does, and its trade-offs.")
+        exp_cols = st.columns(2)
+        for i, name in enumerate(names):
+            info = MODEL_EXPLANATIONS[name]
+            row = lb_df[lb_df['Model'] == name].iloc[0]
+            with exp_cols[i % 2]:
+                with st.expander(f"{name}  ·  {info['family']}"):
+                    st.markdown(f"**How it works:** {info['how']}")
+                    st.markdown(f"**✅ Strengths:** {info['strengths']}")
+                    st.markdown(f"**⚠️ Weaknesses:** {info['weaknesses']}")
+                    st.markdown(f"**🎯 Best for:** {info['best_for']}")
+                    st.markdown(
+                        f"**This run →** F1 `{row['F1']:.3f}` · "
+                        f"ROC-AUC `{row['ROC-AUC']:.3f}` · "
+                        f"Accuracy `{row['Accuracy']:.3f}` · "
+                        f"trained in `{row['Train (ms)']:.1f} ms`")
 
 # ── TAB 1: TOP KEYWORDS ───────────────────────────────────────────────────────
 with tab_keywords:
@@ -237,7 +457,10 @@ with tab_predictions:
         st.warning(f"⚠️ Could not train model: {result}")
         st.info("Run the collector a few times to build training data (needs 15+ keyword records).")
     else:
-        accuracy_label = f"{result:.1%}" if isinstance(result, float) else "loaded from cache"
+        if isinstance(result, float) and result == result:  # not NaN
+            accuracy_label = f"{result:.1%}"
+        else:
+            accuracy_label = "loaded from cache"
         st.success(f"✅ Model ready — cross-validated accuracy: **{accuracy_label}**")
 
         col_fi, col_info = st.columns([2, 1])
