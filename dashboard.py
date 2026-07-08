@@ -144,7 +144,7 @@ with tab_modellab:
 
         st.dataframe(
             show_df.style.apply(_highlight_winner, axis=1),
-            use_container_width=True, hide_index=True,
+            width='stretch', hide_index=True,
         )
 
         winner = lb_df.iloc[0]
@@ -172,7 +172,7 @@ with tab_modellab:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 font_color='white', yaxis=dict(range=[0, 1]),
                 legend=dict(font=dict(size=9)))
-            st.plotly_chart(fig_metrics, use_container_width=True)
+            st.plotly_chart(fig_metrics, width='stretch')
 
         with col_roc:
             st.subheader("📈 ROC Curves")
@@ -192,7 +192,7 @@ with tab_modellab:
                 font_color='white', title='True vs. False Positive Rate (AUC in legend)',
                 xaxis_title='False Positive Rate', yaxis_title='True Positive Rate',
                 legend=dict(font=dict(size=9), yanchor='bottom', y=0.02, xanchor='right', x=0.98))
-            st.plotly_chart(fig_roc, use_container_width=True)
+            st.plotly_chart(fig_roc, width='stretch')
 
         # ── Confusion matrices grid ───────────────────────────────────────────
         st.subheader("🔲 Confusion Matrices")
@@ -212,7 +212,7 @@ with tab_modellab:
                     paper_bgcolor='rgba(0,0,0,0)', font_color='white',
                     coloraxis_showscale=False, height=280,
                     margin=dict(l=10, r=10, t=40, b=10))
-                st.plotly_chart(fig_cm, use_container_width=True)
+                st.plotly_chart(fig_cm, width='stretch')
 
         # ── Feature importance comparison ─────────────────────────────────────
         st.subheader("🧩 What Each Model Pays Attention To")
@@ -235,7 +235,7 @@ with tab_modellab:
             fig_fi.update_layout(
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 font_color='white', xaxis_tickangle=-40, legend=dict(font=dict(size=9)))
-            st.plotly_chart(fig_fi, use_container_width=True)
+            st.plotly_chart(fig_fi, width='stretch')
 
         # ── Cross-model live predictions (the "lined up" view) ────────────────
         st.subheader("🎯 Live Predictions — Every Model, Side by Side")
@@ -270,7 +270,7 @@ with tab_modellab:
             style = (display.style
                      .map(_rg_color, subset=prob_cols)
                      .format({c: '{:.1f}' for c in prob_cols}))
-            st.dataframe(style, use_container_width=True, hide_index=True)
+            st.dataframe(style, width='stretch', hide_index=True)
             st.caption("🟢 green = model predicts a jump · 🔴 red = model predicts no jump. "
                        "Disagreement across a row = genuine model uncertainty on that keyword.")
         else:
@@ -321,7 +321,7 @@ with tab_keywords:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 font_color='white'
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.info("📊 No keyword data available yet. Run the collector!")
 
@@ -354,7 +354,7 @@ with tab_keywords:
             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
             font_color='white', xaxis_title="Date", yaxis_title="Mentions"
         )
-        st.plotly_chart(fig_tl, use_container_width=True)
+        st.plotly_chart(fig_tl, width='stretch')
 
     # Keyword heatmap (top 10 keywords × day of week)
     st.subheader("🗓️ Keyword Activity Heatmap")
@@ -384,7 +384,7 @@ with tab_keywords:
             fig_heat.update_layout(
                 paper_bgcolor='rgba(0,0,0,0)', font_color='white'
             )
-            st.plotly_chart(fig_heat, use_container_width=True)
+            st.plotly_chart(fig_heat, width='stretch')
     else:
         st.info("📅 Heatmap will appear after multiple collection runs")
 
@@ -423,7 +423,7 @@ with tab_trending:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 font_color='white', showlegend=False
             )
-            st.plotly_chart(fig_vel, use_container_width=True)
+            st.plotly_chart(fig_vel, width='stretch')
 
         with col_tl:
             st.subheader("🚀 Top Movers")
@@ -477,7 +477,7 @@ with tab_predictions:
                 font_color='white', showlegend=False,
                 yaxis={'categoryorder': 'total ascending'}
             )
-            st.plotly_chart(fig_fi, use_container_width=True)
+            st.plotly_chart(fig_fi, width='stretch')
         with col_info:
             st.subheader("📐 Feature Guide")
             st.markdown("""
@@ -514,7 +514,7 @@ with tab_predictions:
                     font_color='white', showlegend=False,
                     yaxis=dict(range=[0, 100])
                 )
-                st.plotly_chart(fig_pred, use_container_width=True)
+                st.plotly_chart(fig_pred, width='stretch')
 
             with col_pl:
                 st.subheader("📈 Top Predicted")
@@ -547,7 +547,7 @@ with tab_predictions:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 font_color='white'
             )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            st.plotly_chart(fig_scatter, width='stretch')
 
         else:
             st.info("No keywords predicted to trend right now — run the collector to build data.")
@@ -572,7 +572,7 @@ with tab_platform:
                 color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
             )
             fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='white')
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width='stretch')
 
         with col_bar:
             # Top keywords per platform side-by-side
@@ -596,7 +596,7 @@ with tab_platform:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 font_color='white'
             )
-            st.plotly_chart(fig_plat_bar, use_container_width=True)
+            st.plotly_chart(fig_plat_bar, width='stretch')
 
         # Platform activity over time
         st.subheader("📅 Platform Activity Over Time")
@@ -611,7 +611,7 @@ with tab_platform:
             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
             font_color='white'
         )
-        st.plotly_chart(fig_area, use_container_width=True)
+        st.plotly_chart(fig_area, width='stretch')
     else:
         st.info("No keyword data available for the selected time range.")
 
@@ -700,7 +700,7 @@ with tab_insights:
             if col in top_feat.columns:
                 top_feat[col] = top_feat[col].round(2)
 
-        st.dataframe(top_feat, use_container_width=True)
+        st.dataframe(top_feat, width='stretch')
 
         # Radar chart for top 5 entities across key dimensions
         if len(top_feat) >= 3:
@@ -728,7 +728,7 @@ with tab_insights:
                 paper_bgcolor='rgba(0,0,0,0)', font_color='white',
                 title='Normalized Feature Comparison (top 5 entities)',
             )
-            st.plotly_chart(fig_radar, use_container_width=True)
+            st.plotly_chart(fig_radar, width='stretch')
     else:
         st.info("No feature data available yet — run the collector first.")
 
@@ -762,7 +762,7 @@ with tab_pipeline:
                 'Error': r.error_message or '',
             })
         df_runs = pd.DataFrame(runs_data)
-        st.dataframe(df_runs, use_container_width=True)
+        st.dataframe(df_runs, width='stretch')
 
         # Story collection rate chart
         if len(runs_data) > 1:
@@ -783,7 +783,7 @@ with tab_pipeline:
                     plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                     font_color='white'
                 )
-                st.plotly_chart(fig_runs, use_container_width=True)
+                st.plotly_chart(fig_runs, width='stretch')
     else:
         st.info("No pipeline runs recorded yet. Run `python test_hn_api.py` to start a collection.")
 
