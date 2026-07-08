@@ -15,6 +15,58 @@ def _get_client():
     return _client
 
 
+def summarize_market_signals(live_df, leaderboard: list, sentiment_note: str = "") -> str:
+    """
+    Generate an analyst-style briefing on the current sentiment -> market signals.
+    """
+    client = _get_client()
+    if client is None:
+        return "Claude API unavailable. Set ANTHROPIC_API_KEY in your .env to enable AI briefings."
+    if live_df is None or len(live_df) == 0:
+        return "No live signals yet. Run the collector or seed_data.py first."
+
+    signal_lines = "\n".join(
+        f"- {r['name']} ({r['ticker']}): consensus {r['Consensus']:.0f}% up, "
+        f"signal {r['Signal']}, avg headline sentiment {r['avg_sentiment']:+.2f}, "
+        f"{int(r['buzz'])} stories"
+        for _, r in live_df.iterrows()
+    )
+    best = leaderboard[0] if leaderboard else {}
+    model_note = (f"Best model: {best.get('Model')} "
+                  f"(F1 {best.get('F1', 0):.2f}, ROC-AUC {best.get('ROC-AUC', 0):.2f}, "
+                  f"accuracy {best.get('Accuracy', 0):.2f})." if best else "")
+
+    prompt = f"""You are a quantitative market analyst. Below are today's model-generated
+signals from TrendFlow, which predicts next-day price direction for tech equities and
+crypto from social-media sentiment + price momentum.
+
+{model_note}
+
+SIGNALS (consensus = average predicted probability the asset rises tomorrow):
+{signal_lines}
+
+{sentiment_note}
+
+Write a sharp 3-paragraph briefing:
+1. The strongest BUY conviction(s) and what sentiment/buzz is driving them.
+2. The bearish / SELL signals and the caution flags.
+3. An honest reliability caveat — these models run at ~55-65% accuracy on a noisy
+   signal; state plainly how a trader should (and shouldn't) use this.
+
+Tone: crisp, data-driven, no hype. Cite specific tickers and numbers."""
+
+    try:
+        response = client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=1100,
+            thinking={"type": "adaptive"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "\n\n".join(b.text for b in response.content if b.type == "text")
+    except Exception as e:
+        return f"Briefing generation failed: {e}"
+
+
 def summarize_trends(feature_df, platform_breakdown: dict) -> str:
     """
     Generate a human-readable trend narrative using Claude.

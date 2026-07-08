@@ -1,13 +1,15 @@
 import requests
-from database.models import Story, Keyword, Article, PipelineRun
+from database.models import Story, Keyword, Article, PipelineRun, MarketData
 from database.db_setup import db_connection, getSession
 from datetime import datetime
 from analysis.entity_extractor import extract_entities
+from analysis.sentiment import score_sentiment
 from data_collection.news_collector import search_news
 from data_collection.reddit_collector import collect_reddit
 from data_collection.devto_collector import collect_devto
 from data_collection.github_collector import collect_github_trending
 from data_collection.rss_collector import collect_rss
+from data_collection.market_collector import collect_market_data
 from collections import Counter
 
 
@@ -34,12 +36,38 @@ def _save_stories(session, posts, platform_label, existing_urls: set):
             num_comments=post.get('num_comments', 0),
             url=url,
             platform=platform_label,
+            sentiment=score_sentiment(post['title']),
             timestamp=datetime.utcnow(),
         )
         session.add(story)
         new_count += 1
         all_entities.extend(extract_entities(post['title'], top_n=10))
     return all_entities, new_count
+
+
+def _collect_market(session):
+    """Fetch daily prices for tracked tickers and upsert into MarketData."""
+    print("=== Market Prices (yfinance) ===")
+    try:
+        bars = collect_market_data()
+        existing = {(m.ticker, m.date.date() if hasattr(m.date, 'date') else m.date)
+                    for m in session.query(MarketData).all()}
+        added = 0
+        for b in bars:
+            key = (b['ticker'], b['date'].date() if hasattr(b['date'], 'date') else b['date'])
+            if key in existing:
+                continue
+            existing.add(key)
+            session.add(MarketData(
+                ticker=b['ticker'], date=b['date'], open=b['open'], close=b['close'],
+                high=b['high'], low=b['low'], volume=b['volume'], return_pct=b['return_pct']))
+            added += 1
+        session.commit()
+        print(f"Saved {added} new price bars\n")
+        return added > 0
+    except Exception as e:
+        print(f"Market error: {e}\n")
+        return False
 
 
 def _save_keywords(session, entity_list, platform_label):
@@ -193,6 +221,10 @@ def run_pipeline():
         print(f"Saved {new_articles} new news articles\n")
     except Exception as e:
         print(f"NewsAPI error (check NEWS_API_KEY in .env): {e}\n")
+
+    # ── Market prices ─────────────────────────────────────────────────────────
+    if _collect_market(session):
+        sources_run.append('market')
 
     # ── Finalize pipeline run ─────────────────────────────────────────────────
     run.finished_at = datetime.utcnow()

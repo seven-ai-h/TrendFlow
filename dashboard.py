@@ -1,812 +1,494 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-from database.db_setup import getSession
-from database.models import Story, Keyword, Article, PipelineRun
+import os
 from datetime import datetime, timedelta
+from collections import Counter
+
+import numpy as np
+import pandas as pd
+import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from collections import Counter, defaultdict
-import os
 
-if not os.path.exists('trendflow.db'):
-    st.warning("⚠️ No data available. This is a demo deployment.")
-    st.info("To see live data, run the collector locally and connect to a cloud database.")
-    st.stop()
+from database.db_setup import getSession
+from database.models import Story, MarketData, PipelineRun
 
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="TrendFlow Dashboard",
-    page_icon="🔥",
+    page_title="TrendFlow — Sentiment → Market Signals",
+    page_icon="📡",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-st.markdown("""
+if not os.path.exists("trendflow.db"):
+    st.warning("⚠️ No database found. Run `python seed_data.py` (demo data) "
+               "or `python test_hn_api.py` (live data) first.")
+    st.stop()
+
+# ── Design tokens (validated data-viz dark palette) ───────────────────────────
+SURFACE = "#1a1a19"
+GRID = "#2c2c2a"
+INK = "#ffffff"
+INK2 = "#c3c2b7"
+GOOD = "#0ca30c"
+BAD = "#d03b3b"
+ACCENT = "#3987e5"
+CAT_COLORS = {
+    "Linear & Probabilistic": "#3987e5",
+    "Tree Ensembles": "#199e70",
+    "Kernel & Neural": "#9085e9",
+}
+
+st.markdown(f"""
 <style>
-    .main { padding: 0rem 1rem; }
-    .stMetric {
-        background-color: #1E1E1E;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #333;
-    }
-    h1 { color: #FF6B6B; padding-bottom: 20px; }
-    h2 { color: #4ECDC4; padding-top: 20px; }
+    .block-container {{ padding-top: 2rem; }}
+    h1 {{ color: {INK}; font-weight: 800; letter-spacing: -0.5px; }}
+    h2, h3 {{ color: {INK}; }}
+    .cat-banner {{
+        border-radius: 10px; padding: 10px 14px; margin-bottom: 10px;
+        font-weight: 700; font-size: 1.05rem; color: #fff;
+    }}
+    .model-card {{
+        background: {SURFACE}; border: 1px solid {GRID};
+        border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+    }}
+    .model-card .mname {{ font-weight: 700; font-size: 0.98rem; }}
+    .model-card .mrow {{ color: {INK2}; font-size: 0.82rem; font-variant-numeric: tabular-nums; }}
+    .sig-buy {{ color: {GOOD}; font-weight: 700; }}
+    .sig-sell {{ color: {BAD}; font-weight: 700; }}
+    .sig-hold {{ color: {INK2}; font-weight: 700; }}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🔥 TrendFlow — Real-Time Trend Detection & ML Model Lab")
-st.markdown("*Multi-source trend pipeline · 6-model ML comparison · LLM-generated insights*")
 
-# Sidebar
-st.sidebar.header("⚙️ Settings")
-days_back = st.sidebar.slider("📅 Time Range (days)", 1, 365, 7)
-min_keyword_count = st.sidebar.slider("🔢 Min Keyword Frequency", 1, 100, 2)
-velocity_threshold = st.sidebar.slider("⚡ Velocity Threshold", 0.5, 10.0, 2.0, 0.5)
-refresh = st.sidebar.button("🔄 Refresh Data")
+def _has_statsmodels():
+    try:
+        import statsmodels  # noqa: F401
+        return True
+    except Exception:
+        return False
 
-cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+
+def style_fig(fig, height=None, legend=True):
+    fig.update_layout(
+        plot_bgcolor=SURFACE, paper_bgcolor="rgba(0,0,0,0)",
+        font_color=INK, font_size=12,
+        margin=dict(l=10, r=10, t=44, b=10),
+        xaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
+        yaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
+    )
+    if height:
+        fig.update_layout(height=height)
+    if not legend:
+        fig.update_layout(showlegend=False)
+    else:
+        fig.update_layout(legend=dict(font=dict(size=10)))
+    return fig
+
+
 session = getSession()
 
-# === METRICS ROW ===
-col1, col2, col3, col4 = st.columns(4)
+# ── Header ────────────────────────────────────────────────────────────────────
+st.title("📡 TrendFlow — Sentiment → Market Signals")
+st.markdown(
+    f"<span style='color:{INK2}'>Predicting <b>next-day price direction</b> for tech "
+    f"equities & crypto from <b>headline sentiment</b> + <b>social buzz</b> + price "
+    f"momentum — compared across six ML models in three families.</span>",
+    unsafe_allow_html=True,
+)
 
-total_stories = session.query(Story).filter(Story.timestamp >= cutoff_date).count()
-total_keywords = session.query(Keyword).filter(Keyword.timestamp >= cutoff_date).count()
-total_articles = session.query(Article).filter(Article.timestamp >= cutoff_date).count()
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+st.sidebar.header("⚙️ Controls")
+lookback = st.sidebar.slider("📅 Training lookback (days)", 20, 90, 60, 5)
+st.sidebar.caption("How much price/sentiment history to train the models on.")
+if st.sidebar.button("🔄 Refresh data"):
+    st.session_state.pop("lab", None)
+    st.rerun()
+st.sidebar.divider()
+st.sidebar.markdown(
+    f"<small style='color:{INK2}'>Demo data is synthetic (network-restricted box). "
+    f"Run <code>test_hn_api.py</code> locally for live headlines + real prices via "
+    f"yfinance.</small>", unsafe_allow_html=True)
 
-previous_cutoff = cutoff_date - timedelta(days=days_back)
-prev_stories = session.query(Story).filter(
-    Story.timestamp >= previous_cutoff,
-    Story.timestamp < cutoff_date
-).count()
-growth = ((total_stories - prev_stories) / prev_stories * 100) if prev_stories > 0 else 0
+# ── KPI row ───────────────────────────────────────────────────────────────────
+n_stories = session.query(Story).count()
+n_prices = session.query(MarketData).count()
+n_tickers = session.query(MarketData.ticker).distinct().count()
+sents = [s.sentiment for s in session.query(Story.sentiment).all() if s.sentiment is not None]
+avg_sent = float(np.mean(sents)) if sents else 0.0
 
-col1.metric("📰 Total Stories", f"{total_stories:,}", f"{growth:+.1f}%")
-col2.metric("🏷️ Unique Keywords", f"{total_keywords:,}")
-col3.metric("📄 News Articles", f"{total_articles:,}")
-col4.metric("⏱️ Data Range", f"{days_back} days")
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("🏦 Tickers tracked", n_tickers)
+k2.metric("📰 Headlines analyzed", f"{n_stories:,}")
+k3.metric("📈 Price bars", f"{n_prices:,}")
+sent_word = "Bullish" if avg_sent > 0.1 else ("Bearish" if avg_sent < -0.1 else "Neutral")
+k4.metric("💬 Avg sentiment", f"{avg_sent:+.2f}", sent_word)
 
 st.divider()
 
-# === TABS ===
-(tab_modellab, tab_predictions, tab_trending, tab_keywords,
- tab_platform, tab_insights, tab_stories, tab_pipeline) = st.tabs([
-    "🧪 Model Lab", "🤖 Live Predictions", "⚡ Trending Now", "📊 Keywords",
-    "🌐 Platform Split", "🧠 AI Insights", "📰 Stories & News", "🔧 Pipeline"
+# ── Train models once, cache in session ───────────────────────────────────────
+from analysis.model_lab import (
+    train_all_models, MODEL_COLORS, MODEL_CATEGORY, MODEL_EXPLANATIONS,
+)
+
+
+def get_lab():
+    if "lab" not in st.session_state or st.session_state.get("lab_lb") != lookback:
+        with st.spinner("Training six models across three families…"):
+            st.session_state["lab"] = train_all_models(session, days_back=lookback)
+            st.session_state["lab_lb"] = lookback
+    return st.session_state["lab"]
+
+
+tab_signals, tab_lab, tab_sentiment, tab_price, tab_ai, tab_pipeline = st.tabs([
+    "📡 Live Signals", "🧪 Model Lab", "💬 Sentiment & Buzz",
+    "📈 Price & Correlation", "🧠 AI Briefing", "🔧 Pipeline",
 ])
 
-
-# ── TAB 0: MODEL LAB (multi-model comparison) ─────────────────────────────────
-with tab_modellab:
-    import plotly.graph_objects as _go
-    from plotly.subplots import make_subplots
-    from analysis.model_lab import train_all_models, MODEL_EXPLANATIONS
-
-    st.header("🧪 Model Lab — Six ML Models, One Task, Lined Up")
-    st.markdown(
-        "**The task:** given how a keyword has behaved so far, *will its mentions "
-        "jump more than 1.3× tomorrow?* Every model below is trained on the **exact "
-        "same** engineered features and test split, so you can compare them fairly — "
-        "who's most accurate, who catches the most real jumps, and where they disagree."
-    )
-
-    MODEL_COLORS = {
-        'Logistic Regression': '#4ECDC4',
-        'Random Forest': '#FF6B35',
-        'Gradient Boosting': '#FFD93D',
-        'SVM (RBF)': '#6E40C9',
-        'K-Nearest Neighbors': '#FF4500',
-        'Neural Net (MLP)': '#3B49DF',
-    }
-
-    col_run, col_note = st.columns([1, 3])
-    with col_run:
-        do_train = st.button("🚀 Train / Retrain All Models", type="primary")
-    with col_note:
-        st.caption("Training runs 6 classifiers with cross-validation. Results are "
-                   "cached until you retrain or reload data.")
-
-    if do_train or 'model_lab_results' not in st.session_state:
-        with st.spinner("Training Logistic Regression, Random Forest, Gradient Boosting, "
-                        "SVM, KNN and a Neural Net…"):
-            st.session_state['model_lab_results'] = train_all_models(session)
-
-    results = st.session_state['model_lab_results']
-
-    if not results.get('ok'):
-        st.warning(f"⚠️ {results.get('error')}")
-        st.info("Run `python seed_data.py` (demo data) or the collector to build a training set.")
+# ══ TAB 1: LIVE SIGNALS ═══════════════════════════════════════════════════════
+with tab_signals:
+    st.header("📡 Today's Signals")
+    st.caption("Model consensus probability that each asset closes **up tomorrow**, "
+               "with the driving sentiment. Not financial advice — see the reliability "
+               "note in the Model Lab.")
+    lab = get_lab()
+    if not lab["ok"]:
+        st.warning(f"⚠️ {lab['error']}")
     else:
-        # ── Dataset summary ───────────────────────────────────────────────────
-        bal = results['class_balance']
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("🧾 Training Samples", f"{results['n_samples']:,}")
-        m2.metric("📈 Jump events", f"{bal['jump']:,}")
-        m3.metric("➖ No-jump events", f"{bal['no_jump']:,}")
-        pos_rate = bal['jump'] / max(1, (bal['jump'] + bal['no_jump'])) * 100
-        m4.metric("⚖️ Positive rate", f"{pos_rate:.1f}%")
+        live = lab["live"]
+        n_buy = (live["Signal"] == "BUY").sum()
+        n_sell = (live["Signal"] == "SELL").sum()
+        n_hold = (live["Signal"] == "HOLD").sum()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🟢 BUY signals", int(n_buy))
+        c2.metric("⚪ HOLD", int(n_hold))
+        c3.metric("🔴 SELL signals", int(n_sell))
 
-        lb_df = pd.DataFrame(results['leaderboard'])
+        col_chart, col_list = st.columns([2, 1])
+        with col_chart:
+            dfl = live.copy()
+            dfl["color"] = dfl["Signal"].map({"BUY": GOOD, "SELL": BAD, "HOLD": INK2})
+            fig = go.Figure(go.Bar(
+                x=dfl["Consensus"], y=dfl["name"], orientation="h",
+                marker_color=dfl["color"],
+                text=[f"{v:.0f}%" for v in dfl["Consensus"]],
+                textposition="outside",
+                hovertemplate="%{y}: %{x:.1f}% up<extra></extra>",
+            ))
+            fig.add_vline(x=50, line_dash="dash", line_color=INK2)
+            fig.update_layout(title="Consensus P(up tomorrow) by asset",
+                              yaxis=dict(autorange="reversed"),
+                              xaxis=dict(range=[0, 100], title="Consensus %"))
+            st.plotly_chart(style_fig(fig, height=420, legend=False), use_container_width=True)
+        with col_list:
+            st.subheader("Ranked")
+            for _, r in live.iterrows():
+                cls = f"sig-{r['Signal'].lower()}"
+                st.markdown(
+                    f"**{r['name']}** <span class='{cls}'>{r['Signal']}</span><br>"
+                    f"<small style='color:{INK2}'>{r['Consensus']:.0f}% up · "
+                    f"sentiment {r['avg_sentiment']:+.2f} · {int(r['buzz'])} stories</small>",
+                    unsafe_allow_html=True)
+                st.markdown("<hr style='margin:6px 0;border-color:#2c2c2a'>", unsafe_allow_html=True)
+
+# ══ TAB 2: MODEL LAB (3 categories) ═══════════════════════════════════════════
+with tab_lab:
+    st.header("🧪 Model Lab — Three Families, One Task")
+    st.markdown(
+        "**The task:** given a ticker's social sentiment/buzz today plus its price "
+        "momentum, *will it close up tomorrow?* Every model trains on the **same** "
+        "features and split. Grouped into three algorithm families so it's easy to read."
+    )
+    lab = get_lab()
+    if not lab["ok"]:
+        st.warning(f"⚠️ {lab['error']}")
+    else:
+        bal = lab["class_balance"]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("🧾 Samples", f"{lab['n_samples']:,}")
+        m2.metric("🏦 Tickers", lab["n_tickers"])
+        m3.metric("📈 Up days", bal["up"])
+        m4.metric("📉 Down days", bal["down"])
+
+        lb_df = pd.DataFrame(lab["leaderboard"])
+        winner = lb_df.iloc[0]
+
+        # ── THREE CATEGORY COLUMNS ────────────────────────────────────────────
+        st.subheader("Model families")
+        cat_cols = st.columns(3)
+        for col, (cat_name, cat) in zip(cat_cols, lab["categories"].items()):
+            with col:
+                st.markdown(
+                    f"<div class='cat-banner' style='background:{cat['color']}'>{cat_name}</div>",
+                    unsafe_allow_html=True)
+                st.markdown(f"<small style='color:{INK2}'>{cat['blurb']}</small>",
+                            unsafe_allow_html=True)
+                for mname in cat["models"]:
+                    row = lb_df[lb_df["Model"] == mname].iloc[0]
+                    crown = " 👑" if mname == winner["Model"] else ""
+                    st.markdown(
+                        f"<div class='model-card'>"
+                        f"<div class='mname' style='color:{cat['color']}'>{mname}{crown}</div>"
+                        f"<div class='mrow'>F1 <b>{row['F1']:.3f}</b> · "
+                        f"AUC <b>{row['ROC-AUC']:.3f}</b></div>"
+                        f"<div class='mrow'>Acc {row['Accuracy']:.3f} · "
+                        f"CV {row['CV Acc']:.3f} · {row['Train (ms)']:.0f} ms</div>"
+                        f"</div>", unsafe_allow_html=True)
+                    cm = np.array(lab["confusion"][mname])
+                    figcm = px.imshow(
+                        cm, text_auto=True, color_continuous_scale="Blues",
+                        x=["Down", "Up"], y=["Down", "Up"],
+                        labels=dict(x="Predicted", y="Actual"))
+                    figcm.update_layout(coloraxis_showscale=False, height=200,
+                                        margin=dict(l=6, r=6, t=6, b=6),
+                                        paper_bgcolor="rgba(0,0,0,0)", font_color=INK)
+                    st.plotly_chart(figcm, use_container_width=True)
+
+        st.divider()
 
         # ── Leaderboard ───────────────────────────────────────────────────────
         st.subheader("🏆 Leaderboard")
-        st.caption("Ranked by F1 (balance of precision & recall), then ROC-AUC. "
-                   "The winner is highlighted.")
-
-        show_df = lb_df.copy()
-        for c in ['Accuracy', 'Precision', 'Recall', 'F1', 'ROC-AUC', 'CV Acc', 'CV Std']:
-            show_df[c] = show_df[c].map(lambda v: f"{v:.3f}" if pd.notna(v) else "—")
-        show_df['Train (ms)'] = show_df['Train (ms)'].map(lambda v: f"{v:.1f}")
-
-        def _highlight_winner(row):
-            return ['background-color: rgba(78,205,196,0.18)'] * len(row) if row.name == 0 else [''] * len(row)
-
-        st.dataframe(
-            show_df.style.apply(_highlight_winner, axis=1),
-            width='stretch', hide_index=True,
-        )
-
-        winner = lb_df.iloc[0]
         st.success(
-            f"🥇 **Best model: {winner['Model']}** — "
+            f"🥇 **{winner['Model']}** ({winner['Category']}) leads — "
             f"F1 {winner['F1']:.3f}, ROC-AUC {winner['ROC-AUC']:.3f}, "
-            f"Accuracy {winner['Accuracy']:.3f}. "
-            f"{MODEL_EXPLANATIONS[winner['Model']]['best_for']}"
-        )
+            f"accuracy {winner['Accuracy']:.3f}. "
+            f"On a noisy market signal, a simple model often wins — complex models "
+            f"overfit the noise.")
+        show = lb_df[["Model", "Category", "Accuracy", "Precision", "Recall",
+                      "F1", "ROC-AUC", "CV Acc"]].copy()
+        for c in ["Accuracy", "Precision", "Recall", "F1", "ROC-AUC", "CV Acc"]:
+            show[c] = show[c].map(lambda v: f"{v:.3f}" if pd.notna(v) else "—")
+        st.dataframe(show, use_container_width=True, hide_index=True)
 
-        # ── Metric comparison bars + ROC curves ───────────────────────────────
-        col_metrics, col_roc = st.columns(2)
-
-        with col_metrics:
-            st.subheader("📊 Metric Comparison")
-            metric_long = lb_df.melt(
-                id_vars='Model',
-                value_vars=['Accuracy', 'Precision', 'Recall', 'F1'],
-                var_name='Metric', value_name='Score')
-            fig_metrics = px.bar(
-                metric_long, x='Metric', y='Score', color='Model', barmode='group',
-                color_discrete_map=MODEL_COLORS,
-                title='Accuracy · Precision · Recall · F1 (per model)')
-            fig_metrics.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                font_color='white', yaxis=dict(range=[0, 1]),
-                legend=dict(font=dict(size=9)))
-            st.plotly_chart(fig_metrics, width='stretch')
-
-        with col_roc:
-            st.subheader("📈 ROC Curves")
-            fig_roc = _go.Figure()
-            fig_roc.add_trace(_go.Scatter(
-                x=[0, 1], y=[0, 1], mode='lines',
-                line=dict(dash='dash', color='gray'), name='Random (0.5)',
-                showlegend=True))
-            for name, rc in results['roc'].items():
-                auc_lbl = f"{rc['auc']:.3f}" if rc['auc'] == rc['auc'] else "—"
-                fig_roc.add_trace(_go.Scatter(
-                    x=rc['fpr'], y=rc['tpr'], mode='lines',
-                    name=f"{name} ({auc_lbl})",
+        # ── Metric bars + ROC ─────────────────────────────────────────────────
+        cA, cB = st.columns(2)
+        with cA:
+            st.subheader("📊 Metric comparison")
+            ml = lb_df.melt(id_vars="Model",
+                            value_vars=["Accuracy", "Precision", "Recall", "F1"],
+                            var_name="Metric", value_name="Score")
+            figm = px.bar(ml, x="Metric", y="Score", color="Model", barmode="group",
+                          color_discrete_map=MODEL_COLORS)
+            figm.update_layout(yaxis=dict(range=[0, 1]), title="Per-model metrics")
+            st.plotly_chart(style_fig(figm, height=360), use_container_width=True)
+        with cB:
+            st.subheader("📈 ROC curves")
+            figr = go.Figure()
+            figr.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
+                                      line=dict(dash="dash", color=INK2), name="Random"))
+            for name, rc in lab["roc"].items():
+                auc = rc["auc"]
+                figr.add_trace(go.Scatter(
+                    x=rc["fpr"], y=rc["tpr"], mode="lines",
+                    name=f"{name} ({auc:.2f})",
                     line=dict(color=MODEL_COLORS.get(name), width=2)))
-            fig_roc.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                font_color='white', title='True vs. False Positive Rate (AUC in legend)',
-                xaxis_title='False Positive Rate', yaxis_title='True Positive Rate',
-                legend=dict(font=dict(size=9), yanchor='bottom', y=0.02, xanchor='right', x=0.98))
-            st.plotly_chart(fig_roc, width='stretch')
+            figr.update_layout(title="True vs false positive rate",
+                               xaxis_title="FPR", yaxis_title="TPR")
+            st.plotly_chart(style_fig(figr, height=360), use_container_width=True)
 
-        # ── Confusion matrices grid ───────────────────────────────────────────
-        st.subheader("🔲 Confusion Matrices")
-        st.caption("Rows = actual, columns = predicted. Top-left & bottom-right are correct calls.")
-        conf = results['confusion']
-        names = [r['Model'] for r in results['leaderboard']]
-        cm_cols = st.columns(3)
-        for i, name in enumerate(names):
-            cm = np.array(conf[name])
-            with cm_cols[i % 3]:
-                fig_cm = px.imshow(
-                    cm, text_auto=True, color_continuous_scale='Blues',
-                    labels=dict(x="Predicted", y="Actual", color="Count"),
-                    x=['No Jump', 'Jump'], y=['No Jump', 'Jump'],
-                    title=name)
-                fig_cm.update_layout(
-                    paper_bgcolor='rgba(0,0,0,0)', font_color='white',
-                    coloraxis_showscale=False, height=280,
-                    margin=dict(l=10, r=10, t=40, b=10))
-                st.plotly_chart(fig_cm, width='stretch')
-
-        # ── Feature importance comparison ─────────────────────────────────────
-        st.subheader("🧩 What Each Model Pays Attention To")
-        st.caption("Feature importance (tree models) / |coefficient| (Logistic Regression), "
-                   "normalized per model. SVM-RBF, KNN and MLP don't expose per-feature "
-                   "importances, so they're omitted here.")
-        fi = results['feature_importance']
+        # ── Feature importance ────────────────────────────────────────────────
+        st.subheader("🧩 What drives each model")
+        st.caption("Importance (trees) / |coefficient| (linear), normalized per model. "
+                   "SVM & MLP don't expose per-feature importances, so they're omitted.")
+        fi = lab["feature_importance"]
         if fi:
-            fi_rows = []
-            for model_name, feats in fi.items():
-                total = sum(abs(v) for v in feats.values()) or 1.0
-                for feat, val in feats.items():
-                    fi_rows.append({'Model': model_name, 'Feature': feat,
-                                    'Importance': abs(val) / total})
-            fi_df = pd.DataFrame(fi_rows)
-            fig_fi = px.bar(
-                fi_df, x='Feature', y='Importance', color='Model', barmode='group',
-                color_discrete_map=MODEL_COLORS,
-                title='Normalized Feature Importance by Model')
-            fig_fi.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                font_color='white', xaxis_tickangle=-40, legend=dict(font=dict(size=9)))
-            st.plotly_chart(fig_fi, width='stretch')
+            rows = []
+            for mn, feats in fi.items():
+                tot = sum(abs(v) for v in feats.values()) or 1.0
+                for fe, va in feats.items():
+                    rows.append({"Model": mn, "Feature": fe, "Importance": abs(va) / tot})
+            figfi = px.bar(pd.DataFrame(rows), x="Feature", y="Importance",
+                           color="Model", barmode="group", color_discrete_map=MODEL_COLORS)
+            figfi.update_layout(title="Normalized feature importance", xaxis_tickangle=-40)
+            st.plotly_chart(style_fig(figfi, height=380), use_container_width=True)
 
-        # ── Cross-model live predictions (the "lined up" view) ────────────────
-        st.subheader("🎯 Live Predictions — Every Model, Side by Side")
-        st.markdown(
-            "Each model's probability (%) that the keyword **jumps tomorrow**, lined up "
-            "so you can see where they **agree** and where they **disagree**. "
-            "`Consensus` is the average; `Agreement` counts how many models vote *jump* (>50%)."
-        )
-        live = results['live']
-        if live is not None and not live.empty:
-            model_names = [r['Model'] for r in results['leaderboard']]
-            display = live.head(15).copy()
-            ordered_cols = (['keyword', 'count', 'velocity'] + model_names +
-                            ['Consensus', 'Agreement'])
-            ordered_cols = [c for c in ordered_cols if c in display.columns]
-            display = display[ordered_cols]
-            display['velocity'] = display['velocity'].round(2)
+        # ── Live predictions lined up ─────────────────────────────────────────
+        st.subheader("🎯 Every model's call, side by side")
+        st.caption("Each model's P(up tomorrow) per ticker. Green = up, red = down.")
+        live = lab["live"]
+        model_names = [r["Model"] for r in lab["leaderboard"]]
+        disp = live[["name"] + model_names + ["Consensus", "Signal"]].copy()
 
-            def _rg_color(val):
-                """Red (0) → yellow (50) → green (100) without matplotlib."""
-                try:
-                    v = max(0.0, min(100.0, float(val))) / 100.0
-                except (TypeError, ValueError):
-                    return ''
-                if v < 0.5:
-                    r, g = 255, int(200 * (v / 0.5))
-                else:
-                    r, g = int(255 * (1 - (v - 0.5) / 0.5)), 200
-                return f'background-color: rgba({r},{g},70,0.55); color: #111;'
+        def rg(val):
+            try:
+                v = max(0.0, min(100.0, float(val))) / 100.0
+            except (TypeError, ValueError):
+                return ""
+            if v < 0.5:
+                r, g = 255, int(200 * v / 0.5)
+            else:
+                r, g = int(255 * (1 - (v - 0.5) / 0.5)), 200
+            return f"background-color: rgba({r},{g},70,0.55); color:#111;"
 
-            prob_cols = model_names + ['Consensus']
-            style = (display.style
-                     .map(_rg_color, subset=prob_cols)
-                     .format({c: '{:.1f}' for c in prob_cols}))
-            st.dataframe(style, width='stretch', hide_index=True)
-            st.caption("🟢 green = model predicts a jump · 🔴 red = model predicts no jump. "
-                       "Disagreement across a row = genuine model uncertainty on that keyword.")
-        else:
-            st.info("No live keywords to score yet.")
+        pc = model_names + ["Consensus"]
+        sty = disp.style.map(rg, subset=pc).format({c: "{:.0f}" for c in pc})
+        st.dataframe(sty, use_container_width=True, hide_index=True)
 
-        # ── Model explainer cards ─────────────────────────────────────────────
-        st.subheader("📖 Model Explainer")
-        st.caption("What each algorithm actually does, and its trade-offs.")
-        exp_cols = st.columns(2)
-        for i, name in enumerate(names):
-            info = MODEL_EXPLANATIONS[name]
-            row = lb_df[lb_df['Model'] == name].iloc[0]
-            with exp_cols[i % 2]:
-                with st.expander(f"{name}  ·  {info['family']}"):
-                    st.markdown(f"**How it works:** {info['how']}")
-                    st.markdown(f"**✅ Strengths:** {info['strengths']}")
-                    st.markdown(f"**⚠️ Weaknesses:** {info['weaknesses']}")
-                    st.markdown(f"**🎯 Best for:** {info['best_for']}")
-                    st.markdown(
-                        f"**This run →** F1 `{row['F1']:.3f}` · "
-                        f"ROC-AUC `{row['ROC-AUC']:.3f}` · "
-                        f"Accuracy `{row['Accuracy']:.3f}` · "
-                        f"trained in `{row['Train (ms)']:.1f} ms`")
+        # ── Explainers grouped by family ──────────────────────────────────────
+        st.subheader("📖 Model explainer")
+        ecols = st.columns(3)
+        for col, (cat_name, cat) in zip(ecols, lab["categories"].items()):
+            with col:
+                st.markdown(f"<div class='cat-banner' style='background:{cat['color']};"
+                            f"font-size:0.92rem'>{cat_name}</div>", unsafe_allow_html=True)
+                for mname in cat["models"]:
+                    info = MODEL_EXPLANATIONS[mname]
+                    with st.expander(mname):
+                        st.markdown(f"**How:** {info['how']}")
+                        st.markdown(f"**✅ {info['strengths']}**")
+                        st.markdown(f"**⚠️ {info['weaknesses']}**")
+                        st.markdown(f"**🎯 Best for:** {info['best_for']}")
 
-# ── TAB 1: TOP KEYWORDS ───────────────────────────────────────────────────────
-with tab_keywords:
-    st.header("📊 Top Trending Keywords")
+# ══ TAB 3: SENTIMENT & BUZZ ═══════════════════════════════════════════════════
+with tab_sentiment:
+    st.header("💬 Sentiment & Buzz")
+    st.caption("Headline sentiment (VADER + finance lexicon) is the core feature. "
+               "Mention volume = the 'buzz' feature folded into the models.")
+    from analysis.market_features import tickers_in_text, TICKER_NAMES
 
-    keywords_data = session.query(Keyword).filter(
-        Keyword.timestamp >= cutoff_date,
-        Keyword.count >= min_keyword_count
-    ).order_by(Keyword.count.desc()).limit(20).all()
-
-    col_chart, col_list = st.columns([2, 1])
-
-    with col_chart:
-        if keywords_data:
-            df_keywords = pd.DataFrame([
-                {'Keyword': kw.keyword, 'Count': kw.count, 'Platform': kw.platform}
-                for kw in keywords_data
-            ])
-            fig = px.bar(
-                df_keywords, x='Keyword', y='Count', color='Platform',
-                title='Top 20 Keywords by Frequency',
-                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
-            )
-            fig.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                font_color='white'
-            )
-            st.plotly_chart(fig, width='stretch')
-        else:
-            st.info("📊 No keyword data available yet. Run the collector!")
-
-    with col_list:
-        st.subheader("🔥 Hot Keywords")
-        if keywords_data:
-            for i, kw in enumerate(keywords_data[:10], 1):
-                emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🔹"
-                st.markdown(f"{emoji} **{kw.keyword}** — {kw.count} mentions")
-        else:
-            st.info("No data yet")
-
-    # Keyword timeline
-    st.subheader("📈 Keyword Trends Over Time")
-    all_keywords = session.query(Keyword).filter(Keyword.timestamp >= cutoff_date).all()
-
-    if all_keywords and keywords_data:
-        timeline_data = [{'date': kw.timestamp.date(), 'keyword': kw.keyword, 'count': kw.count}
-                         for kw in all_keywords]
-        df_timeline = pd.DataFrame(timeline_data)
-        top_5 = df_keywords.head(5)['Keyword'].tolist()
-        df_filtered = df_timeline[df_timeline['keyword'].isin(top_5)]
-        df_grouped = df_filtered.groupby(['date', 'keyword'])['count'].sum().reset_index()
-
-        fig_tl = px.line(
-            df_grouped, x='date', y='count', color='keyword',
-            title='Top 5 Keywords Over Time', markers=True
-        )
-        fig_tl.update_layout(
-            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-            font_color='white', xaxis_title="Date", yaxis_title="Mentions"
-        )
-        st.plotly_chart(fig_tl, width='stretch')
-
-    # Keyword heatmap (top 10 keywords × day of week)
-    st.subheader("🗓️ Keyword Activity Heatmap")
-    if all_keywords and keywords_data:
-        top_10_kws = df_keywords.head(10)['Keyword'].tolist()
-        heat_rows = []
-        for kw in all_keywords:
-            if kw.keyword in top_10_kws:
-                heat_rows.append({
-                    'keyword': kw.keyword,
-                    'day': kw.timestamp.strftime('%a'),
-                    'count': kw.count
-                })
-        if heat_rows:
-            df_heat = pd.DataFrame(heat_rows)
-            df_heat_pivot = df_heat.groupby(['keyword', 'day'])['count'].sum().unstack(fill_value=0)
-            day_order = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-            df_heat_pivot = df_heat_pivot.reindex(
-                columns=[d for d in day_order if d in df_heat_pivot.columns]
-            )
-            fig_heat = px.imshow(
-                df_heat_pivot,
-                color_continuous_scale='Oranges',
-                title='Keyword Frequency by Day of Week',
-                aspect='auto'
-            )
-            fig_heat.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)', font_color='white'
-            )
-            st.plotly_chart(fig_heat, width='stretch')
+    stories = session.query(Story).all()
+    rows = []
+    for s in stories:
+        for tk in tickers_in_text(s.title or ""):
+            rows.append({"ticker": tk, "name": TICKER_NAMES.get(tk, tk),
+                         "sentiment": s.sentiment or 0.0, "date": s.timestamp.date(),
+                         "title": s.title})
+    if not rows:
+        st.info("No ticker-tagged headlines yet.")
     else:
-        st.info("📅 Heatmap will appear after multiple collection runs")
+        sdf = pd.DataFrame(rows)
+        cL, cR = st.columns(2)
+        with cL:
+            st.subheader("Average sentiment by asset")
+            agg = sdf.groupby("name")["sentiment"].mean().reset_index().sort_values("sentiment")
+            agg["clr"] = agg["sentiment"].apply(lambda v: GOOD if v > 0 else BAD)
+            figs = go.Figure(go.Bar(
+                x=agg["sentiment"], y=agg["name"], orientation="h",
+                marker_color=agg["clr"],
+                hovertemplate="%{y}: %{x:+.2f}<extra></extra>"))
+            figs.update_layout(title="Mean headline sentiment", xaxis_title="Sentiment")
+            st.plotly_chart(style_fig(figs, height=380, legend=False), use_container_width=True)
+        with cR:
+            st.subheader("Buzz (mention volume) by asset")
+            buzz = sdf.groupby("name").size().reset_index(name="mentions").sort_values("mentions")
+            figb = go.Figure(go.Bar(
+                x=buzz["mentions"], y=buzz["name"], orientation="h",
+                marker_color=ACCENT,
+                hovertemplate="%{y}: %{x} mentions<extra></extra>"))
+            figb.update_layout(title="Total mentions", xaxis_title="Headlines")
+            st.plotly_chart(style_fig(figb, height=380, legend=False), use_container_width=True)
 
+        st.subheader("Sentiment over time (top-buzz assets)")
+        top_names = sdf.groupby("name").size().nlargest(5).index.tolist()
+        ts = (sdf[sdf["name"].isin(top_names)]
+              .groupby(["date", "name"])["sentiment"].mean().reset_index())
+        ts["date"] = pd.to_datetime(ts["date"])
+        figt = px.line(ts, x="date", y="sentiment", color="name", markers=True)
+        figt.add_hline(y=0, line_dash="dash", line_color=INK2)
+        figt.update_layout(title="Daily mean sentiment", yaxis_title="Sentiment")
+        st.plotly_chart(style_fig(figt, height=360), use_container_width=True)
 
-# ── TAB 2: TRENDING NOW ───────────────────────────────────────────────────────
-with tab_trending:
-    st.header("⚡ Currently Trending")
-    st.markdown("Keywords with the highest velocity compared to their 7-day baseline.")
+        cB1, cB2 = st.columns(2)
+        with cB1:
+            st.subheader("🟢 Most bullish headlines")
+            for _, r in sdf.nlargest(6, "sentiment").iterrows():
+                st.markdown(f"<small style='color:{GOOD}'>+{r['sentiment']:.2f}</small> "
+                            f"{r['title']}", unsafe_allow_html=True)
+        with cB2:
+            st.subheader("🔴 Most bearish headlines")
+            for _, r in sdf.nsmallest(6, "sentiment").iterrows():
+                st.markdown(f"<small style='color:{BAD}'>{r['sentiment']:.2f}</small> "
+                            f"{r['title']}", unsafe_allow_html=True)
 
-    from analysis.trend_detector import detect_trending_keywords
+# ══ TAB 4: PRICE & CORRELATION ════════════════════════════════════════════════
+with tab_price:
+    st.header("📈 Price & Sentiment Correlation")
+    from analysis.market_features import TICKER_NAMES, tickers_in_text
 
-    with st.spinner("Calculating trend velocities…"):
-        trending = detect_trending_keywords(session, velocity_threshold=velocity_threshold)
-
-    if trending:
-        df_trending = pd.DataFrame(trending)
-        df_trending['velocity_display'] = df_trending['velocity'].apply(
-            lambda v: "∞" if v == float('inf') else f"{v:.1f}×"
-        )
-        df_trending['velocity_num'] = df_trending['velocity'].apply(
-            lambda v: 999 if v == float('inf') else v
-        )
-
-        col_tv, col_tl = st.columns([3, 1])
-
-        with col_tv:
-            fig_vel = px.bar(
-                df_trending.head(15),
-                x='keyword', y='velocity_num',
-                title=f'Keyword Velocity (threshold: {velocity_threshold}×)',
-                color='velocity_num',
-                color_continuous_scale='Reds',
-                labels={'velocity_num': 'Velocity', 'keyword': 'Keyword'}
-            )
-            fig_vel.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                font_color='white', showlegend=False
-            )
-            st.plotly_chart(fig_vel, width='stretch')
-
-        with col_tl:
-            st.subheader("🚀 Top Movers")
-            for row in trending[:10]:
-                v = row['velocity']
-                label = "∞" if v == float('inf') else f"{v:.1f}×"
-                st.markdown(f"**{row['keyword']}** `{label}`  \n"
-                            f"<small>{row['recent_count']} now vs {row['baseline_count']} baseline</small>",
-                            unsafe_allow_html=True)
-                st.markdown("---")
+    md = session.query(MarketData).all()
+    if not md:
+        st.info("No price data. Run seed_data.py or the collector.")
     else:
-        st.info(f"No keywords exceeding {velocity_threshold}× velocity right now. "
-                "Lower the threshold in the sidebar or wait for more data.")
+        pdf = pd.DataFrame([{"ticker": m.ticker, "date": m.date, "close": m.close,
+                             "return_pct": m.return_pct} for m in md])
+        pdf["name"] = pdf["ticker"].map(TICKER_NAMES).fillna(pdf["ticker"])
+        pdf["date"] = pd.to_datetime(pdf["date"])
+        names = sorted(pdf["name"].unique())
+        pick = st.selectbox("Asset", names, index=0)
+        sub = pdf[pdf["name"] == pick].sort_values("date")
 
+        # price line
+        figp = go.Figure(go.Scatter(x=sub["date"], y=sub["close"], mode="lines",
+                                    line=dict(color=ACCENT, width=2), name="Close"))
+        figp.update_layout(title=f"{pick} — closing price", yaxis_title="Price")
+        st.plotly_chart(style_fig(figp, height=320, legend=False), use_container_width=True)
 
-# ── TAB 3: AI PREDICTIONS ─────────────────────────────────────────────────────
-with tab_predictions:
-    st.header("🤖 ML-Powered Trend Predictions")
-    st.markdown(
-        "**Gradient Boosting classifier** trained on a rich feature matrix: "
-        "cross-source scores, exponential moving averages (3h/6h/24h), "
-        "velocity, acceleration, and platform diversity."
-    )
+        # overlay daily sentiment for this ticker
+        tk = sub["ticker"].iloc[0]
+        srows = [{"date": s.timestamp.date(), "sentiment": s.sentiment or 0.0}
+                 for s in session.query(Story).all() if tk in tickers_in_text(s.title or "")]
+        if srows:
+            sd = pd.DataFrame(srows).groupby("date")["sentiment"].mean().reset_index()
+            sd["date"] = pd.to_datetime(sd["date"])
+            merged = sub.merge(sd, on="date", how="inner")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Daily sentiment")
+                figsd = go.Figure(go.Bar(
+                    x=sd["date"], y=sd["sentiment"],
+                    marker_color=[GOOD if v > 0 else BAD for v in sd["sentiment"]]))
+                figsd.update_layout(title=f"{pick} sentiment", yaxis_title="Sentiment")
+                st.plotly_chart(style_fig(figsd, height=300, legend=False), use_container_width=True)
+            with c2:
+                st.subheader("Sentiment → next-day return")
+                m2 = merged.copy()
+                m2["next_return"] = m2["return_pct"].shift(-1)
+                m2 = m2.dropna(subset=["next_return"])
+                if len(m2) > 2:
+                    figsc = px.scatter(m2, x="sentiment", y="next_return",
+                                       trendline="ols" if _has_statsmodels() else None,
+                                       color_discrete_sequence=[ACCENT])
+                    figsc.update_layout(title="Does today's mood predict tomorrow?",
+                                        xaxis_title="Sentiment today",
+                                        yaxis_title="Next-day return %")
+                    st.plotly_chart(style_fig(figsc, height=300, legend=False), use_container_width=True)
+                    corr = m2["sentiment"].corr(m2["next_return"])
+                    st.caption(f"Correlation (this asset): **{corr:+.2f}** — "
+                               "positive means bullish headlines tend to precede gains.")
 
-    from analysis.trend_predictor import load_or_train_model, predict_trending_keywords, get_feature_importances
+# ══ TAB 5: AI BRIEFING ════════════════════════════════════════════════════════
+with tab_ai:
+    st.header("🧠 AI Market Briefing")
+    st.caption("Claude reads the live signals + sentiment and writes an analyst briefing.")
+    from analysis.trend_summarizer import summarize_market_signals
 
-    with st.spinner("Loading / training prediction model…"):
-        model, scaler, result = load_or_train_model(session)
-
-    if model is None:
-        st.warning(f"⚠️ Could not train model: {result}")
-        st.info("Run the collector a few times to build training data (needs 15+ keyword records).")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        st.warning("⚠️ Set `ANTHROPIC_API_KEY` in your `.env` to enable AI briefings.")
     else:
-        if isinstance(result, float) and result == result:  # not NaN
-            accuracy_label = f"{result:.1%}"
-        else:
-            accuracy_label = "loaded from cache"
-        st.success(f"✅ Model ready — cross-validated accuracy: **{accuracy_label}**")
-
-        col_fi, col_info = st.columns([2, 1])
-        with col_fi:
-            fi_df = get_feature_importances(model)
-            fig_fi = px.bar(
-                fi_df, x='importance', y='feature', orientation='h',
-                title='Feature Importances (Gradient Boosting)',
-                color='importance', color_continuous_scale='Teal',
-                labels={'importance': 'Importance', 'feature': 'Feature'}
-            )
-            fig_fi.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                font_color='white', showlegend=False,
-                yaxis={'categoryorder': 'total ascending'}
-            )
-            st.plotly_chart(fig_fi, width='stretch')
-        with col_info:
-            st.subheader("📐 Feature Guide")
-            st.markdown("""
-| Feature | Meaning |
-|---|---|
-| `velocity_1h` | Last-1h vs 24h baseline |
-| `acceleration` | Δ velocity vs 1h ago |
-| `cross_source_score` | Platform-weighted count |
-| `platform_diversity` | # distinct platforms |
-| `ema_3h / 6h / 24h` | Exponential moving avg |
-| `count` | Raw mention count |
-| `day_of_week` | Seasonality signal |
-""")
-
-        with st.spinner("Running predictions…"):
-            predictions = predict_trending_keywords(session, model, scaler, top_n=15)
-
-        if predictions:
-            df_preds = pd.DataFrame(predictions)
-
-            col_pc, col_pl = st.columns([3, 1])
-
-            with col_pc:
-                fig_pred = px.bar(
-                    df_preds,
-                    x='keyword', y='confidence',
-                    color='confidence',
-                    color_continuous_scale='Teal',
-                    title='Predicted Trending Keywords — Confidence %',
-                    labels={'confidence': 'Confidence (%)', 'keyword': 'Keyword'}
-                )
-                fig_pred.update_layout(
-                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                    font_color='white', showlegend=False,
-                    yaxis=dict(range=[0, 100])
-                )
-                st.plotly_chart(fig_pred, width='stretch')
-
-            with col_pl:
-                st.subheader("📈 Top Predicted")
-                for pred in predictions[:10]:
-                    conf = pred['confidence']
-                    bar_filled = int(conf / 10)
-                    bar = "█" * bar_filled + "░" * (10 - bar_filled)
-                    st.markdown(
-                        f"**{pred['keyword']}**  \n"
-                        f"`{bar}` {conf:.1f}%  \n"
-                        f"<small>vel={pred['velocity_1h']:.2f}x · "
-                        f"accel={pred['acceleration']:+.2f} · "
-                        f"{pred['platform_diversity']} platforms</small>",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown("---")
-
-            st.subheader("📊 Velocity vs. Confidence (coloured by acceleration)")
-            fig_scatter = px.scatter(
-                df_preds,
-                x='velocity_1h', y='confidence',
-                size='cross_source_score', color='acceleration',
-                hover_name='keyword',
-                color_continuous_scale='RdYlGn',
-                title='Velocity vs. Predicted Confidence (size = cross-source score)',
-                labels={'velocity_1h': 'Velocity (1h)', 'confidence': 'Confidence (%)',
-                        'acceleration': 'Acceleration'}
-            )
-            fig_scatter.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                font_color='white'
-            )
-            st.plotly_chart(fig_scatter, width='stretch')
-
-        else:
-            st.info("No keywords predicted to trend right now — run the collector to build data.")
-
-
-# ── TAB 4: PLATFORM SPLIT ─────────────────────────────────────────────────────
-with tab_platform:
-    st.header("🌐 Platform Analysis")
-
-    kw_all = session.query(Keyword).filter(Keyword.timestamp >= cutoff_date).all()
-
-    if kw_all:
-        platform_counts = Counter(kw.platform for kw in kw_all)
-        df_plat = pd.DataFrame(list(platform_counts.items()), columns=['Platform', 'Keywords'])
-
-        col_pie, col_bar = st.columns(2)
-
-        with col_pie:
-            fig_pie = px.pie(
-                df_plat, names='Platform', values='Keywords',
-                title='Keyword Distribution by Platform',
-                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
-            )
-            fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='white')
-            st.plotly_chart(fig_pie, width='stretch')
-
-        with col_bar:
-            # Top keywords per platform side-by-side
-            df_kw_all = pd.DataFrame([
-                {'keyword': kw.keyword, 'platform': kw.platform, 'count': kw.count}
-                for kw in kw_all
-            ])
-            top_per_platform = (
-                df_kw_all.groupby(['platform', 'keyword'])['count'].sum()
-                .reset_index()
-                .sort_values('count', ascending=False)
-                .groupby('platform').head(8)
-            )
-            fig_plat_bar = px.bar(
-                top_per_platform, x='keyword', y='count', color='platform',
-                barmode='group',
-                title='Top Keywords per Platform',
-                color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
-            )
-            fig_plat_bar.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                font_color='white'
-            )
-            st.plotly_chart(fig_plat_bar, width='stretch')
-
-        # Platform activity over time
-        st.subheader("📅 Platform Activity Over Time")
-        df_kw_all['date'] = pd.to_datetime([kw.timestamp.date() for kw in kw_all])
-        df_daily_plat = df_kw_all.groupby(['date', 'platform'])['count'].sum().reset_index()
-        fig_area = px.area(
-            df_daily_plat, x='date', y='count', color='platform',
-            title='Daily Keyword Volume by Platform',
-            color_discrete_map={'hackernews': '#FF6B35', 'news': '#4ECDC4', 'reddit': '#FF4500', 'devto': '#3B49DF', 'github': '#6E40C9'}
-        )
-        fig_area.update_layout(
-            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-            font_color='white'
-        )
-        st.plotly_chart(fig_area, width='stretch')
-    else:
-        st.info("No keyword data available for the selected time range.")
-
-
-# ── TAB 5: STORIES & NEWS ─────────────────────────────────────────────────────
-with tab_stories:
-    st.header("📰 Stories & News")
-
-    col_hn, col_news = st.columns(2)
-
-    with col_hn:
-        st.subheader("🔶 Hacker News")
-        recent_stories = session.query(Story).filter(
-            Story.timestamp >= cutoff_date
-        ).order_by(Story.score.desc()).limit(15).all()
-
-        if recent_stories:
-            for story in recent_stories:
-                with st.expander(f"⬆️ {story.score} | {story.title}"):
-                    st.write(f"**Comments:** {story.num_comments}")
-                    st.write(f"**Posted:** {story.timestamp.strftime('%Y-%m-%d %H:%M')}")
-                    if story.url:
-                        st.write(f"**Link:** {story.url}")
-        else:
-            st.info("No stories in this time range.")
-
-    with col_news:
-        st.subheader("📡 News Articles")
-        recent_articles = session.query(Article).filter(
-            Article.timestamp >= cutoff_date
-        ).order_by(Article.timestamp.desc()).limit(15).all()
-
-        if recent_articles:
-            for article in recent_articles:
-                with st.expander(f"📰 {article.title}"):
-                    st.write(f"**Source:** {article.source}")
-                    st.write(f"**Published:** {article.published_at or article.timestamp.strftime('%Y-%m-%d %H:%M')}")
-                    if article.url:
-                        st.write(f"**Link:** {article.url}")
-        else:
-            st.info("No news articles in this time range. "
-                    "Add a NEWS_API_KEY to .env and re-run the collector.")
-
-# ── TAB 6: AI INSIGHTS ────────────────────────────────────────────────────────
-with tab_insights:
-    st.header("🧠 AI-Generated Trend Insights")
-    st.markdown(
-        "Claude analyzes the current feature matrix — velocity, cross-source scores, "
-        "platform diversity, and acceleration — to write a real-time tech trend report."
-    )
-
-    from analysis.feature_engineer import build_feature_matrix
-    from analysis.trend_summarizer import summarize_trends
-
-    api_key_set = bool(os.getenv("ANTHROPIC_API_KEY"))
-    if not api_key_set:
-        st.warning("⚠️ Set `ANTHROPIC_API_KEY` in your `.env` file to enable AI summaries.")
-    else:
-        if st.button("🔄 Generate Trend Summary", type="primary"):
-            with st.spinner("Building feature matrix and calling Claude…"):
-                feat_df = build_feature_matrix(session, hours_back=48)
-
-                kw_all = session.query(Keyword).filter(Keyword.timestamp >= cutoff_date).all()
-                platform_breakdown = dict(Counter(kw.platform for kw in kw_all))
-
-                summary = summarize_trends(feat_df, platform_breakdown)
-
+        lab = get_lab()
+        if lab["ok"] and st.button("📝 Generate briefing", type="primary"):
+            with st.spinner("Claude is analyzing the signals…"):
+                note = f"Overall market sentiment is {avg_sent:+.2f} across {n_stories} headlines."
+                text = summarize_market_signals(lab["live"], lab["leaderboard"], note)
             st.markdown("---")
-            st.markdown(summary)
-            st.caption(f"Generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        else:
-            st.info("Click **Generate Trend Summary** to call Claude and produce an analysis.")
+            st.markdown(text)
+            st.caption(f"Generated {datetime.now():%Y-%m-%d %H:%M}")
 
-    # Show feature matrix table regardless of API key
-    st.subheader("📐 Current Feature Matrix (top 20 by velocity)")
-    with st.spinner("Computing features…"):
-        feat_preview = build_feature_matrix(session, hours_back=48)
-
-    if not feat_preview.empty:
-        display_cols = ['keyword', 'count', 'platform_diversity', 'cross_source_score',
-                        'ema_3h', 'ema_6h', 'ema_24h', 'velocity_1h', 'acceleration']
-        available = [c for c in display_cols if c in feat_preview.columns]
-        top_feat = feat_preview.nlargest(20, 'velocity_1h')[available].reset_index(drop=True)
-
-        for col in ['cross_source_score', 'ema_3h', 'ema_6h', 'ema_24h', 'velocity_1h', 'acceleration']:
-            if col in top_feat.columns:
-                top_feat[col] = top_feat[col].round(2)
-
-        st.dataframe(top_feat, width='stretch')
-
-        # Radar chart for top 5 entities across key dimensions
-        if len(top_feat) >= 3:
-            st.subheader("🕸️ Multi-Dimensional Entity Comparison (top 5)")
-            radar_cols = ['velocity_1h', 'platform_diversity', 'cross_source_score', 'acceleration']
-            radar_cols = [c for c in radar_cols if c in top_feat.columns]
-            top5 = top_feat.head(5)
-
-            fig_radar = go.Figure()
-            for _, row in top5.iterrows():
-                values = [max(0, row[c]) for c in radar_cols]
-                values_norm = []
-                for i, c in enumerate(radar_cols):
-                    col_max = top_feat[c].abs().max()
-                    values_norm.append(values[i] / col_max if col_max > 0 else 0)
-                fig_radar.add_trace(go.Scatterpolar(
-                    r=values_norm + [values_norm[0]],
-                    theta=radar_cols + [radar_cols[0]],
-                    fill='toself',
-                    name=str(row['keyword'])[:20],
-                    opacity=0.7,
-                ))
-            fig_radar.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
-                paper_bgcolor='rgba(0,0,0,0)', font_color='white',
-                title='Normalized Feature Comparison (top 5 entities)',
-            )
-            st.plotly_chart(fig_radar, width='stretch')
-    else:
-        st.info("No feature data available yet — run the collector first.")
-
-
-# ── TAB 7: PIPELINE MONITOR ───────────────────────────────────────────────────
+# ══ TAB 6: PIPELINE ═══════════════════════════════════════════════════════════
 with tab_pipeline:
-    st.header("🔧 Data Pipeline Monitor")
-    st.markdown("Observability for each collection run — tracks sources, throughput, and errors.")
-
-    try:
-        recent_runs = session.query(PipelineRun).order_by(
-            PipelineRun.started_at.desc()
-        ).limit(20).all()
-    except Exception:
-        recent_runs = []
-
-    if recent_runs:
-        runs_data = []
-        for r in recent_runs:
-            duration = (
-                (r.finished_at - r.started_at).total_seconds()
-                if r.finished_at else None
-            )
-            runs_data.append({
-                'Started': r.started_at.strftime('%Y-%m-%d %H:%M'),
-                'Status': r.status or '—',
-                'Sources': r.sources_run or '—',
-                'New Stories': r.stories_collected or 0,
-                'Entities': r.keywords_extracted or 0,
-                'Duration (s)': round(duration, 1) if duration else '—',
-                'Error': r.error_message or '',
-            })
-        df_runs = pd.DataFrame(runs_data)
-        st.dataframe(df_runs, width='stretch')
-
-        # Story collection rate chart
-        if len(runs_data) > 1:
-            df_chart = pd.DataFrame([
-                {'run': r.started_at, 'stories': r.stories_collected or 0,
-                 'entities': r.keywords_extracted or 0}
-                for r in recent_runs if r.finished_at
-            ])
-            if not df_chart.empty:
-                fig_runs = px.line(
-                    df_chart.melt(id_vars='run', value_vars=['stories', 'entities']),
-                    x='run', y='value', color='variable',
-                    title='Stories & Entities Collected per Run',
-                    markers=True,
-                    labels={'run': 'Run time', 'value': 'Count', 'variable': 'Metric'}
-                )
-                fig_runs.update_layout(
-                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                    font_color='white'
-                )
-                st.plotly_chart(fig_runs, width='stretch')
+    st.header("🔧 Pipeline Monitor")
+    runs = session.query(PipelineRun).order_by(PipelineRun.started_at.desc()).limit(20).all()
+    if runs:
+        rdf = pd.DataFrame([{
+            "Started": r.started_at.strftime("%Y-%m-%d %H:%M"),
+            "Status": r.status, "Sources": r.sources_run,
+            "Stories": r.stories_collected, "Entities": r.keywords_extracted,
+            "Duration (s)": round((r.finished_at - r.started_at).total_seconds(), 1)
+            if r.finished_at else "—",
+        } for r in runs])
+        st.dataframe(rdf, use_container_width=True, hide_index=True)
     else:
-        st.info("No pipeline runs recorded yet. Run `python test_hn_api.py` to start a collection.")
+        st.info("No pipeline runs recorded. Run `python test_hn_api.py`.")
 
-    st.subheader("📋 Source Coverage Summary")
-    col_s1, col_s2, col_s3 = st.columns(3)
-    platforms = ['hackernews', 'reddit', 'devto', 'github', 'rss', 'news']
-    platform_story_counts = {
-        p: session.query(Story).filter(
-            Story.platform == p, Story.timestamp >= cutoff_date
-        ).count()
-        for p in platforms
-    }
-    rss_count = platform_story_counts.get('rss', 0)
-    news_count = platform_story_counts.get('news', 0)
-    hn_count = platform_story_counts.get('hackernews', 0)
-    col_s1.metric("HN Stories", hn_count)
-    col_s1.metric("Reddit Posts", platform_story_counts.get('reddit', 0))
-    col_s2.metric("Dev.to Articles", platform_story_counts.get('devto', 0))
-    col_s2.metric("GitHub Repos", platform_story_counts.get('github', 0))
-    col_s3.metric("RSS Articles", rss_count)
-    col_s3.metric("News (API)", news_count)
-
-
-# Footer
 st.divider()
-st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | TrendFlow v3.0")
+st.caption(f"Last updated {datetime.now():%Y-%m-%d %H:%M:%S} · TrendFlow v4.0 — "
+           "Sentiment→Market edition")

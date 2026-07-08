@@ -7,7 +7,7 @@ Base = declarative_base()
 #a story class to store fetched api and turn it into a database form so easier to modify
 class Story(Base):
     __tablename__ = 'stories'
-    
+
     id = Column(Integer, primary_key=True)
     title = Column(String(500))
     score = Column(Integer)
@@ -15,6 +15,7 @@ class Story(Base):
     timestamp = Column(DateTime,  default=datetime.utcnow)
     url = Column(Text)
     platform = Column(String(50))
+    sentiment = Column(Float, default=0.0)  # VADER compound score, [-1, 1]
 
 class Keyword(Base):
     __tablename__ = 'keywords'
@@ -35,6 +36,22 @@ class Article(Base):
     published_at = Column(DateTime)
     platform = Column(String(50))  # 'news' or 'rss'
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+class MarketData(Base):
+    """Daily OHLCV price bars for each tracked ticker — the prediction target."""
+    __tablename__ = 'market_data'
+
+    id = Column(Integer, primary_key=True)
+    ticker = Column(String(20))
+    date = Column(DateTime)
+    open = Column(Float)
+    close = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    volume = Column(Float)
+    return_pct = Column(Float)   # daily % return vs previous close
+    __table_args__ = (UniqueConstraint('ticker', 'date', name='uix_ticker_date'),)
 
 
 class PipelineRun(Base):
