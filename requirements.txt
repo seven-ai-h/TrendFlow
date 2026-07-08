@@ -6,3 +6,6 @@ requests
 python-dotenv
 nltk
 schedule
+scikit-learn
+numpy
+joblib

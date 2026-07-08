@@ -1,3 +1,5 @@
+import os
+import joblib
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -6,6 +8,8 @@ from sklearn.model_selection import train_test_split
 from database.db_setup import getSession
 from database.models import Keyword
 from collections import defaultdict
+
+MODEL_PATH = "trendflow_model.joblib"
 
 def prepare_training_data(session, days_back=14):
     """
@@ -82,7 +86,17 @@ def train_prediction_model(session):
     # Accuracy
     accuracy = model.score(X_test, y_test)
     
+    joblib.dump(model, MODEL_PATH)
     return model, accuracy
+
+
+def load_or_train_model(session):
+    """Load a persisted model if fresh enough, otherwise retrain."""
+    if os.path.exists(MODEL_PATH):
+        mtime = datetime.fromtimestamp(os.path.getmtime(MODEL_PATH))
+        if datetime.now() - mtime < timedelta(hours=6):
+            return joblib.load(MODEL_PATH), None
+    return train_prediction_model(session)
 
 def predict_trending_keywords(session, model, top_n=10):
     """
