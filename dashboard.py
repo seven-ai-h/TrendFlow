@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from database.db_setup import getSession
-from database.models import Story, Keyword, Article
+from database.models import Story, Keyword, Article, PipelineRun
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
@@ -70,8 +70,9 @@ col4.metric("⏱️ Data Range", f"{days_back} days")
 st.divider()
 
 # === TABS ===
-tab_keywords, tab_trending, tab_predictions, tab_platform, tab_stories = st.tabs([
-    "📊 Keywords", "⚡ Trending Now", "🤖 AI Predictions", "🌐 Platform Split", "📰 Stories & News"
+tab_keywords, tab_trending, tab_predictions, tab_platform, tab_stories, tab_insights, tab_pipeline = st.tabs([
+    "📊 Keywords", "⚡ Trending Now", "🤖 AI Predictions", "🌐 Platform Split",
+    "📰 Stories & News", "🧠 AI Insights", "🔧 Pipeline"
 ])
 
 # ── TAB 1: TOP KEYWORDS ───────────────────────────────────────────────────────
@@ -220,24 +221,56 @@ with tab_trending:
 
 # ── TAB 3: AI PREDICTIONS ─────────────────────────────────────────────────────
 with tab_predictions:
-    st.header("🤖 AI-Powered Trend Predictions")
-    st.markdown("Random Forest classifier trained on historical keyword velocity patterns "
-                "to predict which topics will surge in the next 24–48 hours.")
+    st.header("🤖 ML-Powered Trend Predictions")
+    st.markdown(
+        "**Gradient Boosting classifier** trained on a rich feature matrix: "
+        "cross-source scores, exponential moving averages (3h/6h/24h), "
+        "velocity, acceleration, and platform diversity."
+    )
 
-    from analysis.trend_predictor import load_or_train_model, predict_trending_keywords
+    from analysis.trend_predictor import load_or_train_model, predict_trending_keywords, get_feature_importances
 
     with st.spinner("Loading / training prediction model…"):
-        model, result = load_or_train_model(session)
+        model, scaler, result = load_or_train_model(session)
 
     if model is None:
         st.warning(f"⚠️ Could not train model: {result}")
-        st.info("The model needs at least 10 data points (roughly 3+ days of collection runs).")
+        st.info("Run the collector a few times to build training data (needs 15+ keyword records).")
     else:
-        accuracy_label = f"{result:.1%}" if isinstance(result, float) else "cached"
-        st.success(f"✅ Model ready — accuracy: **{accuracy_label}**")
+        accuracy_label = f"{result:.1%}" if isinstance(result, float) else "loaded from cache"
+        st.success(f"✅ Model ready — cross-validated accuracy: **{accuracy_label}**")
+
+        col_fi, col_info = st.columns([2, 1])
+        with col_fi:
+            fi_df = get_feature_importances(model)
+            fig_fi = px.bar(
+                fi_df, x='importance', y='feature', orientation='h',
+                title='Feature Importances (Gradient Boosting)',
+                color='importance', color_continuous_scale='Teal',
+                labels={'importance': 'Importance', 'feature': 'Feature'}
+            )
+            fig_fi.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                font_color='white', showlegend=False,
+                yaxis={'categoryorder': 'total ascending'}
+            )
+            st.plotly_chart(fig_fi, use_container_width=True)
+        with col_info:
+            st.subheader("📐 Feature Guide")
+            st.markdown("""
+| Feature | Meaning |
+|---|---|
+| `velocity_1h` | Last-1h vs 24h baseline |
+| `acceleration` | Δ velocity vs 1h ago |
+| `cross_source_score` | Platform-weighted count |
+| `platform_diversity` | # distinct platforms |
+| `ema_3h / 6h / 24h` | Exponential moving avg |
+| `count` | Raw mention count |
+| `day_of_week` | Seasonality signal |
+""")
 
         with st.spinner("Running predictions…"):
-            predictions = predict_trending_keywords(session, model, top_n=15)
+            predictions = predict_trending_keywords(session, model, scaler, top_n=15)
 
         if predictions:
             df_preds = pd.DataFrame(predictions)
@@ -250,7 +283,7 @@ with tab_predictions:
                     x='keyword', y='confidence',
                     color='confidence',
                     color_continuous_scale='Teal',
-                    title='Predicted Trending Keywords (confidence %)',
+                    title='Predicted Trending Keywords — Confidence %',
                     labels={'confidence': 'Confidence (%)', 'keyword': 'Keyword'}
                 )
                 fig_pred.update_layout(
@@ -269,21 +302,23 @@ with tab_predictions:
                     st.markdown(
                         f"**{pred['keyword']}**  \n"
                         f"`{bar}` {conf:.1f}%  \n"
-                        f"<small>velocity: {pred['velocity']:.2f}</small>",
+                        f"<small>vel={pred['velocity_1h']:.2f}x · "
+                        f"accel={pred['acceleration']:+.2f} · "
+                        f"{pred['platform_diversity']} platforms</small>",
                         unsafe_allow_html=True
                     )
                     st.markdown("---")
 
-            # Scatter: current count vs confidence
-            st.subheader("📊 Count vs. Confidence")
+            st.subheader("📊 Velocity vs. Confidence (coloured by acceleration)")
             fig_scatter = px.scatter(
                 df_preds,
-                x='current_count', y='confidence',
-                size='confidence', color='velocity',
+                x='velocity_1h', y='confidence',
+                size='cross_source_score', color='acceleration',
                 hover_name='keyword',
-                color_continuous_scale='Viridis',
-                title='Current Mention Count vs. Predicted Confidence',
-                labels={'current_count': 'Current Mentions', 'confidence': 'Confidence (%)'}
+                color_continuous_scale='RdYlGn',
+                title='Velocity vs. Predicted Confidence (size = cross-source score)',
+                labels={'velocity_1h': 'Velocity (1h)', 'confidence': 'Confidence (%)',
+                        'acceleration': 'Acceleration'}
             )
             fig_scatter.update_layout(
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
@@ -292,7 +327,7 @@ with tab_predictions:
             st.plotly_chart(fig_scatter, use_container_width=True)
 
         else:
-            st.info("No keywords predicted to trend right now based on recent data.")
+            st.info("No keywords predicted to trend right now — run the collector to build data.")
 
 
 # ── TAB 4: PLATFORM SPLIT ─────────────────────────────────────────────────────
@@ -397,6 +432,158 @@ with tab_stories:
             st.info("No news articles in this time range. "
                     "Add a NEWS_API_KEY to .env and re-run the collector.")
 
+# ── TAB 6: AI INSIGHTS ────────────────────────────────────────────────────────
+with tab_insights:
+    st.header("🧠 AI-Generated Trend Insights")
+    st.markdown(
+        "Claude analyzes the current feature matrix — velocity, cross-source scores, "
+        "platform diversity, and acceleration — to write a real-time tech trend report."
+    )
+
+    from analysis.feature_engineer import build_feature_matrix
+    from analysis.trend_summarizer import summarize_trends
+
+    api_key_set = bool(os.getenv("ANTHROPIC_API_KEY"))
+    if not api_key_set:
+        st.warning("⚠️ Set `ANTHROPIC_API_KEY` in your `.env` file to enable AI summaries.")
+    else:
+        if st.button("🔄 Generate Trend Summary", type="primary"):
+            with st.spinner("Building feature matrix and calling Claude…"):
+                feat_df = build_feature_matrix(session, hours_back=48)
+
+                kw_all = session.query(Keyword).filter(Keyword.timestamp >= cutoff_date).all()
+                platform_breakdown = dict(Counter(kw.platform for kw in kw_all))
+
+                summary = summarize_trends(feat_df, platform_breakdown)
+
+            st.markdown("---")
+            st.markdown(summary)
+            st.caption(f"Generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            st.info("Click **Generate Trend Summary** to call Claude and produce an analysis.")
+
+    # Show feature matrix table regardless of API key
+    st.subheader("📐 Current Feature Matrix (top 20 by velocity)")
+    with st.spinner("Computing features…"):
+        feat_preview = build_feature_matrix(session, hours_back=48)
+
+    if not feat_preview.empty:
+        display_cols = ['keyword', 'count', 'platform_diversity', 'cross_source_score',
+                        'ema_3h', 'ema_6h', 'ema_24h', 'velocity_1h', 'acceleration']
+        available = [c for c in display_cols if c in feat_preview.columns]
+        top_feat = feat_preview.nlargest(20, 'velocity_1h')[available].reset_index(drop=True)
+
+        for col in ['cross_source_score', 'ema_3h', 'ema_6h', 'ema_24h', 'velocity_1h', 'acceleration']:
+            if col in top_feat.columns:
+                top_feat[col] = top_feat[col].round(2)
+
+        st.dataframe(top_feat, use_container_width=True)
+
+        # Radar chart for top 5 entities across key dimensions
+        if len(top_feat) >= 3:
+            st.subheader("🕸️ Multi-Dimensional Entity Comparison (top 5)")
+            radar_cols = ['velocity_1h', 'platform_diversity', 'cross_source_score', 'acceleration']
+            radar_cols = [c for c in radar_cols if c in top_feat.columns]
+            top5 = top_feat.head(5)
+
+            fig_radar = go.Figure()
+            for _, row in top5.iterrows():
+                values = [max(0, row[c]) for c in radar_cols]
+                values_norm = []
+                for i, c in enumerate(radar_cols):
+                    col_max = top_feat[c].abs().max()
+                    values_norm.append(values[i] / col_max if col_max > 0 else 0)
+                fig_radar.add_trace(go.Scatterpolar(
+                    r=values_norm + [values_norm[0]],
+                    theta=radar_cols + [radar_cols[0]],
+                    fill='toself',
+                    name=str(row['keyword'])[:20],
+                    opacity=0.7,
+                ))
+            fig_radar.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+                paper_bgcolor='rgba(0,0,0,0)', font_color='white',
+                title='Normalized Feature Comparison (top 5 entities)',
+            )
+            st.plotly_chart(fig_radar, use_container_width=True)
+    else:
+        st.info("No feature data available yet — run the collector first.")
+
+
+# ── TAB 7: PIPELINE MONITOR ───────────────────────────────────────────────────
+with tab_pipeline:
+    st.header("🔧 Data Pipeline Monitor")
+    st.markdown("Observability for each collection run — tracks sources, throughput, and errors.")
+
+    try:
+        recent_runs = session.query(PipelineRun).order_by(
+            PipelineRun.started_at.desc()
+        ).limit(20).all()
+    except Exception:
+        recent_runs = []
+
+    if recent_runs:
+        runs_data = []
+        for r in recent_runs:
+            duration = (
+                (r.finished_at - r.started_at).total_seconds()
+                if r.finished_at else None
+            )
+            runs_data.append({
+                'Started': r.started_at.strftime('%Y-%m-%d %H:%M'),
+                'Status': r.status or '—',
+                'Sources': r.sources_run or '—',
+                'New Stories': r.stories_collected or 0,
+                'Entities': r.keywords_extracted or 0,
+                'Duration (s)': round(duration, 1) if duration else '—',
+                'Error': r.error_message or '',
+            })
+        df_runs = pd.DataFrame(runs_data)
+        st.dataframe(df_runs, use_container_width=True)
+
+        # Story collection rate chart
+        if len(runs_data) > 1:
+            df_chart = pd.DataFrame([
+                {'run': r.started_at, 'stories': r.stories_collected or 0,
+                 'entities': r.keywords_extracted or 0}
+                for r in recent_runs if r.finished_at
+            ])
+            if not df_chart.empty:
+                fig_runs = px.line(
+                    df_chart.melt(id_vars='run', value_vars=['stories', 'entities']),
+                    x='run', y='value', color='variable',
+                    title='Stories & Entities Collected per Run',
+                    markers=True,
+                    labels={'run': 'Run time', 'value': 'Count', 'variable': 'Metric'}
+                )
+                fig_runs.update_layout(
+                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                    font_color='white'
+                )
+                st.plotly_chart(fig_runs, use_container_width=True)
+    else:
+        st.info("No pipeline runs recorded yet. Run `python test_hn_api.py` to start a collection.")
+
+    st.subheader("📋 Source Coverage Summary")
+    col_s1, col_s2, col_s3 = st.columns(3)
+    platforms = ['hackernews', 'reddit', 'devto', 'github', 'rss', 'news']
+    platform_story_counts = {
+        p: session.query(Story).filter(
+            Story.platform == p, Story.timestamp >= cutoff_date
+        ).count()
+        for p in platforms
+    }
+    rss_count = platform_story_counts.get('rss', 0)
+    news_count = platform_story_counts.get('news', 0)
+    hn_count = platform_story_counts.get('hackernews', 0)
+    col_s1.metric("HN Stories", hn_count)
+    col_s1.metric("Reddit Posts", platform_story_counts.get('reddit', 0))
+    col_s2.metric("Dev.to Articles", platform_story_counts.get('devto', 0))
+    col_s2.metric("GitHub Repos", platform_story_counts.get('github', 0))
+    col_s3.metric("RSS Articles", rss_count)
+    col_s3.metric("News (API)", news_count)
+
+
 # Footer
 st.divider()
-st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | TrendFlow v2.0")
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | TrendFlow v3.0")

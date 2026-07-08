@@ -1,37 +1,52 @@
 import requests
-from database.models import Story, Keyword, Article
+from database.models import Story, Keyword, Article, PipelineRun
 from database.db_setup import db_connection, getSession
 from datetime import datetime
-from analysis.keyword_extractor import extract_keywords
+from analysis.entity_extractor import extract_entities
 from data_collection.news_collector import search_news
 from data_collection.reddit_collector import collect_reddit
 from data_collection.devto_collector import collect_devto
 from data_collection.github_collector import collect_github_trending
+from data_collection.rss_collector import collect_rss
 from collections import Counter
 
 
-def _save_stories(session, posts, platform_label):
-    """Persist a list of post dicts as Story rows and return extracted keywords."""
-    all_keywords = []
+def _existing_urls(session) -> set:
+    """Fetch all URLs already stored (for deduplication)."""
+    story_urls = {r[0] for r in session.query(Story.url).filter(Story.url != '').all()}
+    article_urls = {r[0] for r in session.query(Article.url).filter(Article.url != '').all()}
+    return story_urls | article_urls
+
+
+def _save_stories(session, posts, platform_label, existing_urls: set):
+    """Persist new Story rows (skipping duplicate URLs) and return extracted entities."""
+    all_entities = []
+    new_count = 0
     for post in posts:
+        url = post.get('url', '')
+        if url and url in existing_urls:
+            continue
+        if url:
+            existing_urls.add(url)
         story = Story(
             title=post['title'],
             score=post.get('score', 0),
             num_comments=post.get('num_comments', 0),
-            url=post.get('url', ''),
+            url=url,
             platform=platform_label,
             timestamp=datetime.utcnow(),
         )
         session.add(story)
-        all_keywords.extend(extract_keywords(post['title'], top_n=10))
-    return all_keywords
+        new_count += 1
+        all_entities.extend(extract_entities(post['title'], top_n=10))
+    return all_entities, new_count
 
 
-def _save_keywords(session, keyword_list, platform_label):
-    counts = Counter(keyword_list)
-    for keyword, count in counts.items():
+def _save_keywords(session, entity_list, platform_label):
+    counts = Counter(entity_list)
+    for entity, count in counts.items():
         session.add(Keyword(
-            keyword=keyword,
+            keyword=entity,
             platform=platform_label,
             count=count,
             timestamp=datetime.utcnow(),
@@ -39,13 +54,26 @@ def _save_keywords(session, keyword_list, platform_label):
     return counts
 
 
-def test_hacker_news_api():
-    print("Initializing database...")
+def run_pipeline():
+    print("Initializing database…")
     db_connection()
     session = getSession()
     print("Database ready!\n")
 
-    all_keywords = []
+    existing_urls = _existing_urls(session)
+    print(f"Already stored {len(existing_urls)} unique URLs (will skip duplicates)\n")
+
+    # ── Start pipeline run tracking ───────────────────────────────────────────
+    run = PipelineRun(
+        started_at=datetime.utcnow(),
+        status='running',
+    )
+    session.add(run)
+    session.commit()
+
+    all_entities = []
+    total_stories = 0
+    sources_run = []
 
     # ── Hacker News ───────────────────────────────────────────────────────────
     print("=== Hacker News ===")
@@ -65,12 +93,14 @@ def test_hacker_news_api():
                 'num_comments': item.get('descendants', 0),
                 'url': item.get('url', ''),
             })
-            print(f"  {item['title'][:60]}...")
-        kws = _save_stories(session, hn_posts, 'hackernews')
-        all_keywords.extend(kws)
-        counts = _save_keywords(session, kws, 'hackernews')
+            print(f"  {item['title'][:70]}…")
+        entities, new_count = _save_stories(session, hn_posts, 'hackernews', existing_urls)
+        all_entities.extend(entities)
+        counts = _save_keywords(session, entities, 'hackernews')
         session.commit()
-        print(f"Saved {len(hn_posts)} HN stories, {len(counts)} keywords\n")
+        total_stories += new_count
+        sources_run.append('hackernews')
+        print(f"Saved {new_count} new HN stories, {len(counts)} entity types\n")
     except Exception as e:
         print(f"HN error: {e}\n")
 
@@ -78,11 +108,13 @@ def test_hacker_news_api():
     print("=== Reddit ===")
     try:
         reddit_posts = collect_reddit()
-        kws = _save_stories(session, reddit_posts, 'reddit')
-        all_keywords.extend(kws)
-        counts = _save_keywords(session, kws, 'reddit')
+        entities, new_count = _save_stories(session, reddit_posts, 'reddit', existing_urls)
+        all_entities.extend(entities)
+        counts = _save_keywords(session, entities, 'reddit')
         session.commit()
-        print(f"Saved {len(reddit_posts)} Reddit posts, {len(counts)} keywords\n")
+        total_stories += new_count
+        sources_run.append('reddit')
+        print(f"Saved {new_count} new Reddit posts, {len(counts)} entity types\n")
     except Exception as e:
         print(f"Reddit error: {e}\n")
 
@@ -90,11 +122,13 @@ def test_hacker_news_api():
     print("=== Dev.to ===")
     try:
         devto_posts = collect_devto()
-        kws = _save_stories(session, devto_posts, 'devto')
-        all_keywords.extend(kws)
-        counts = _save_keywords(session, kws, 'devto')
+        entities, new_count = _save_stories(session, devto_posts, 'devto', existing_urls)
+        all_entities.extend(entities)
+        counts = _save_keywords(session, entities, 'devto')
         session.commit()
-        print(f"Saved {len(devto_posts)} Dev.to articles, {len(counts)} keywords\n")
+        total_stories += new_count
+        sources_run.append('devto')
+        print(f"Saved {new_count} new Dev.to articles, {len(counts)} entity types\n")
     except Exception as e:
         print(f"Dev.to error: {e}\n")
 
@@ -102,42 +136,80 @@ def test_hacker_news_api():
     print("=== GitHub Trending ===")
     try:
         github_posts = collect_github_trending()
-        kws = _save_stories(session, github_posts, 'github')
-        all_keywords.extend(kws)
-        counts = _save_keywords(session, kws, 'github')
+        entities, new_count = _save_stories(session, github_posts, 'github', existing_urls)
+        all_entities.extend(entities)
+        counts = _save_keywords(session, entities, 'github')
         session.commit()
-        print(f"Saved {len(github_posts)} GitHub repos, {len(counts)} keywords\n")
+        total_stories += new_count
+        sources_run.append('github')
+        print(f"Saved {new_count} new GitHub repos, {len(counts)} entity types\n")
     except Exception as e:
         print(f"GitHub error: {e}\n")
 
-    # ── NewsAPI (cross-reference top keywords) ────────────────────────────────
+    # ── RSS Feeds ────────────────────────────────────────────────────────────
+    print("=== RSS Feeds ===")
+    try:
+        rss_posts = collect_rss()
+        entities, new_count = _save_stories(session, rss_posts, 'rss', existing_urls)
+        all_entities.extend(entities)
+        counts = _save_keywords(session, entities, 'rss')
+        session.commit()
+        total_stories += new_count
+        sources_run.append('rss')
+        print(f"Saved {new_count} new RSS articles, {len(counts)} entity types\n")
+    except Exception as e:
+        print(f"RSS error: {e}\n")
+
+    # ── NewsAPI (cross-reference top entities) ────────────────────────────────
     print("=== NewsAPI ===")
-    top_keywords = [kw for kw, _ in Counter(all_keywords).most_common(10)]
-    print(f"Cross-referencing top keywords: {top_keywords}")
+    top_entities = [kw for kw, _ in Counter(all_entities).most_common(10)]
+    # Filter to single-word terms for NewsAPI compatibility
+    top_keywords = [e for e in top_entities if ' ' not in e][:10]
+    print(f"Cross-referencing top entities: {top_keywords}")
     try:
         news_articles = search_news(top_keywords, max_results=20)
+        new_articles = 0
         for article in news_articles:
+            url = article.get('url', '')
+            if url and url in existing_urls:
+                continue
+            if url:
+                existing_urls.add(url)
             try:
                 pub_date = datetime.fromisoformat(article['published_at'].replace('Z', '+00:00'))
             except Exception:
                 pub_date = datetime.utcnow()
             session.add(Article(
                 title=article['title'],
-                url=article['url'],
+                url=url,
                 source=article['source'],
                 published_at=pub_date,
                 platform='news',
                 timestamp=datetime.utcnow(),
             ))
+            new_articles += 1
         session.commit()
-        print(f"Saved {len(news_articles)} news articles\n")
+        sources_run.append('news')
+        print(f"Saved {new_articles} new news articles\n")
     except Exception as e:
         print(f"NewsAPI error (check NEWS_API_KEY in .env): {e}\n")
 
-    print("=" * 50)
-    print("Collection complete!")
-    print("=" * 50)
+    # ── Finalize pipeline run ─────────────────────────────────────────────────
+    run.finished_at = datetime.utcnow()
+    run.status = 'success'
+    run.stories_collected = total_stories
+    run.keywords_extracted = len(set(all_entities))
+    run.sources_run = ','.join(sources_run)
+    session.commit()
+
+    elapsed = (run.finished_at - run.started_at).total_seconds()
+    print("=" * 60)
+    print(f"Pipeline complete in {elapsed:.1f}s")
+    print(f"  Sources: {run.sources_run}")
+    print(f"  New stories: {run.stories_collected}")
+    print(f"  Unique entities extracted: {run.keywords_extracted}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    test_hacker_news_api()
+    run_pipeline()

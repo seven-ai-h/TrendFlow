@@ -9,3 +9,6 @@ schedule
 scikit-learn
 numpy
 joblib
+anthropic
+feedparser
+spacy

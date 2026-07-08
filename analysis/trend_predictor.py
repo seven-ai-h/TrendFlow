@@ -3,162 +3,149 @@ import joblib
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from database.db_setup import getSession
-from database.models import Keyword
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import cross_val_score
+from sklearn.preprocessing import StandardScaler
 from collections import defaultdict
 
-MODEL_PATH = "trendflow_model.joblib"
+from database.models import Keyword
+from analysis.feature_engineer import build_feature_matrix, FEATURE_COLS
 
-def prepare_training_data(session, days_back=14):
+MODEL_PATH = "trendflow_model.joblib"
+SCALER_PATH = "trendflow_scaler.joblib"
+
+
+def _label_feature_matrix(df: pd.DataFrame, velocity_thresh: float = 2.0) -> pd.DataFrame:
     """
-    Prepare historical data for training
-    Returns features and labels
+    Assign training labels: 'will_trend' = 1 when velocity > threshold
+    and acceleration is positive (momentum building).
     """
-    cutoff = datetime.utcnow() - timedelta(days=days_back)
-    keywords = session.query(Keyword).filter(Keyword.timestamp >= cutoff).all()
-    
-    # Group by keyword and day
-    keyword_daily = defaultdict(lambda: defaultdict(int))
-    
-    for kw in keywords:
-        day = kw.timestamp.date()
-        keyword_daily[kw.keyword][day] += kw.count
-    
-    # Create features for each keyword
-    training_data = []
-    
-    for keyword, daily_counts in keyword_daily.items():
-        sorted_days = sorted(daily_counts.keys())
-        
-        if len(sorted_days) < 3:  # Need at least 3 days of data
-            continue
-        
-        # For each day (except last 2), create features
-        for i in range(len(sorted_days) - 2):
-            current_day = sorted_days[i]
-            next_day = sorted_days[i + 1]
-            day_after = sorted_days[i + 2] if i + 2 < len(sorted_days) else None
-            
-            # Features: counts from current and previous days
-            current_count = daily_counts[current_day]
-            prev_count = daily_counts.get(sorted_days[i-1], 0) if i > 0 else 0
-            
-            # Calculate velocity
-            velocity = (current_count - prev_count) / prev_count if prev_count > 0 else 0
-            
-            # Label: will it trend tomorrow? (increase by 50%+)
-            future_count = daily_counts.get(next_day, 0)
-            will_trend = 1 if future_count > current_count * 1.5 else 0
-            
-            training_data.append({
-                'keyword': keyword,
-                'current_count': current_count,
-                'prev_count': prev_count,
-                'velocity': velocity,
-                'day_of_week': current_day.weekday(),
-                'will_trend': will_trend
-            })
-    
-    return pd.DataFrame(training_data)
+    df = df.copy()
+    df['will_trend'] = (
+        (df['velocity_1h'] >= velocity_thresh) & (df['acceleration'] >= 0)
+    ).astype(int)
+    return df
+
 
 def train_prediction_model(session):
     """
-    Train a Random Forest model to predict trending keywords
+    Train a Gradient Boosting classifier on the rich feature matrix.
+    Returns (model, cv_accuracy) or (None, error_message).
     """
-    df = prepare_training_data(session)
-    
-    if len(df) < 10:
-        return None, "Not enough historical data. Need at least 10 data points."
-    
-    # Features
-    X = df[['current_count', 'prev_count', 'velocity', 'day_of_week']]
-    y = df['will_trend']
-    
-    # Train/test split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # Train model
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-    
-    # Accuracy
-    accuracy = model.score(X_test, y_test)
-    
+    df = build_feature_matrix(session, hours_back=14 * 24)
+
+    if df.empty or len(df) < 15:
+        return None, "Not enough data. Need at least 15 keyword records (run the collector a few times)."
+
+    df = _label_feature_matrix(df)
+
+    # Drop rows missing any feature
+    valid = df.dropna(subset=FEATURE_COLS + ['will_trend'])
+    if len(valid) < 10:
+        return None, f"Only {len(valid)} complete rows after dropping NaN — need 10+."
+
+    X = valid[FEATURE_COLS].values
+    y = valid['will_trend'].values
+
+    # Normalise features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    model = GradientBoostingClassifier(
+        n_estimators=200,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        random_state=42,
+    )
+
+    # Cross-validated accuracy (3-fold to tolerate small datasets)
+    n_splits = min(3, max(2, len(valid) // 5))
+    cv_scores = cross_val_score(model, X_scaled, y, cv=n_splits, scoring='accuracy')
+    cv_accuracy = cv_scores.mean()
+
+    model.fit(X_scaled, y)
+
     joblib.dump(model, MODEL_PATH)
-    return model, accuracy
+    joblib.dump(scaler, SCALER_PATH)
+
+    return model, cv_accuracy
 
 
 def load_or_train_model(session):
-    """Load a persisted model if fresh enough, otherwise retrain."""
-    if os.path.exists(MODEL_PATH):
+    """Load a cached model if <6 hours old, otherwise retrain."""
+    if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
         mtime = datetime.fromtimestamp(os.path.getmtime(MODEL_PATH))
         if datetime.now() - mtime < timedelta(hours=6):
-            return joblib.load(MODEL_PATH), None
-    return train_prediction_model(session)
-
-def predict_trending_keywords(session, model, top_n=10):
-    """
-    Predict which keywords will trend in next 24-48 hours
-    """
-    # Get recent keywords (last 3 days)
-    cutoff = datetime.utcnow() - timedelta(days=3)
-    recent_keywords = session.query(Keyword).filter(Keyword.timestamp >= cutoff).all()
-    
-    # Group by keyword
-    keyword_data = defaultdict(lambda: {'counts': [], 'dates': []})
-    
-    for kw in recent_keywords:
-        keyword_data[kw.keyword]['counts'].append(kw.count)
-        keyword_data[kw.keyword]['dates'].append(kw.timestamp.date())
-    
-    # Prepare features for prediction
-    predictions = []
-    
-    for keyword, data in keyword_data.items():
-        if len(data['counts']) < 2:
-            continue
-        
-        current_count = data['counts'][-1]
-        prev_count = data['counts'][-2] if len(data['counts']) > 1 else 0
-        velocity = (current_count - prev_count) / prev_count if prev_count > 0 else 0
-        day_of_week = datetime.utcnow().weekday()
-        
-        features = [[current_count, prev_count, velocity, day_of_week]]
-        
-        # Predict
-        will_trend = model.predict(features)[0]
-        confidence = model.predict_proba(features)[0][1]  # Probability of trending
-        
-        if will_trend == 1:
-            predictions.append({
-                'keyword': keyword,
-                'confidence': confidence * 100,
-                'current_count': current_count,
-                'velocity': velocity
-            })
-    
-    # Sort by confidence
-    predictions.sort(key=lambda x: x['confidence'], reverse=True)
-    
-    return predictions[:top_n]
-
-# For testing
-if __name__ == "__main__":
-    session = getSession()
-    
-    print("Training prediction model...")
+            model = joblib.load(MODEL_PATH)
+            scaler = joblib.load(SCALER_PATH)
+            return model, scaler, None  # None = cached (no new accuracy)
     model, result = train_prediction_model(session)
-    
-    if model:
-        print(f"Model trained! Accuracy: {result:.2%}")
-        
-        print("\nPredicting trending keywords...")
-        predictions = predict_trending_keywords(session, model)
-        
-        print("\nKeywords predicted to trend in next 24-48 hours:")
-        for pred in predictions:
-            print(f"• {pred['keyword']}: {pred['confidence']:.1f}% confidence")
+    if model is None:
+        return None, None, result
+    scaler = joblib.load(SCALER_PATH)
+    return model, scaler, result
+
+
+def predict_trending_keywords(session, model, scaler, top_n: int = 10) -> list:
+    """
+    Run the trained model on the current feature snapshot.
+    Returns a ranked list of dicts with keyword, confidence, and key features.
+    """
+    df = build_feature_matrix(session, hours_back=48)
+    if df.empty:
+        return []
+
+    valid = df.dropna(subset=FEATURE_COLS)
+    if valid.empty:
+        return []
+
+    X = valid[FEATURE_COLS].values
+    X_scaled = scaler.transform(X)
+
+    probas = model.predict_proba(X_scaled)
+    # Column 1 = P(will_trend=1)
+    valid = valid.copy()
+    valid['confidence'] = probas[:, 1] * 100
+
+    results = []
+    for _, row in valid.iterrows():
+        results.append({
+            'keyword': row['keyword'],
+            'confidence': row['confidence'],
+            'velocity_1h': row['velocity_1h'],
+            'acceleration': row['acceleration'],
+            'platform_diversity': int(row.get('platform_diversity', 1)),
+            'cross_source_score': row.get('cross_source_score', 0),
+            'current_count': row.get('count', 0),
+        })
+
+    results.sort(key=lambda x: x['confidence'], reverse=True)
+    return results[:top_n]
+
+
+def get_feature_importances(model) -> pd.DataFrame:
+    """Return a DataFrame of feature name → importance for visualization."""
+    importances = model.feature_importances_
+    return (
+        pd.DataFrame({'feature': FEATURE_COLS, 'importance': importances})
+        .sort_values('importance', ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+if __name__ == "__main__":
+    from database.db_setup import getSession
+    session = getSession()
+    print("Training model…")
+    m, s, result = load_or_train_model(session)
+    if m:
+        acc = f"{result:.1%}" if isinstance(result, float) else "loaded from cache"
+        print(f"Model ready — CV accuracy: {acc}")
+        preds = predict_trending_keywords(session, m, s)
+        print("\nTop predicted trending keywords:")
+        for p in preds:
+            print(f"  {p['keyword']}: {p['confidence']:.1f}% confidence "
+                  f"(vel={p['velocity_1h']:.2f}x, accel={p['acceleration']:+.2f})")
     else:
-        print(f"Error: {result}")
+        print(f"Could not train: {result}")

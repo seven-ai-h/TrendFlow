@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, UniqueConstraint
 from datetime import datetime
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -27,11 +27,25 @@ class Keyword(Base):
     
 class Article(Base):
     __tablename__ = 'articles'
-    
+
     id = Column(Integer, primary_key=True)
     title = Column(String(500))
     url = Column(Text)
     source = Column(String(200))
     published_at = Column(DateTime)
-    platform = Column(String(50))  # 'news'
-    timestamp = Column(DateTime, default=datetime.utcnow)  # When we collected it
+    platform = Column(String(50))  # 'news' or 'rss'
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+class PipelineRun(Base):
+    """Tracks each data collection run for data engineering observability."""
+    __tablename__ = 'pipeline_runs'
+
+    id = Column(Integer, primary_key=True)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    status = Column(String(20))          # 'running' | 'success' | 'failed'
+    stories_collected = Column(Integer, default=0)
+    keywords_extracted = Column(Integer, default=0)
+    sources_run = Column(String(500), nullable=True)   # comma-separated
+    error_message = Column(Text, nullable=True)
