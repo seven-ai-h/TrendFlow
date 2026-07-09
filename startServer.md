@@ -51,9 +51,27 @@ and NewsAPI. It only works where outbound APIs are **not** blocked
 (i.e. your local machine — not a restricted/remote sandbox).
 
 ```bash
-python test_hn_api.py      # collect from all sources
+python test_hn_api.py      # collect from all sources (headlines + prices) once
 streamlit run dashboard.py
 ```
+
+### Automatic daily collection
+
+To keep the database growing on its own, run the scheduler. It collects once
+immediately, then every 24 hours (each run only *adds* new data — it dedupes):
+
+```bash
+python scheduler.py                              # every 24 hours
+TRENDFLOW_INTERVAL_HOURS=48 python scheduler.py  # every 48 hours instead
+```
+
+Leave it running in a terminal, or detach it so it keeps going in the background:
+
+```bash
+nohup python scheduler.py > scheduler.log 2>&1 &
+```
+
+Run the dashboard in a separate terminal; it always reads the latest data.
 
 > **Optional:** create a `.env` file with `NEWS_API_KEY=...` (NewsAPI) and
 > `ANTHROPIC_API_KEY=...` (to enable the 🧠 AI Insights tab). A
