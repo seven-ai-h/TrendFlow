@@ -26,15 +26,14 @@ def summarize_market_signals(live_df, leaderboard: list, sentiment_note: str = "
         return "No live signals yet. Run the collector or seed_data.py first."
 
     signal_lines = "\n".join(
-        f"- {r['name']} ({r['ticker']}): consensus {r['Consensus']:.0f}% up, "
-        f"signal {r['Signal']}, avg headline sentiment {r['avg_sentiment']:+.2f}, "
-        f"{int(r['buzz'])} stories"
+        f"- {r['name']} ({r['ticker']}): predicted next-day return {r['pred_return']:+.2f}%, "
+        f"signal {r['Signal']}, avg headline sentiment {r['avg_sentiment']:+.2f}"
         for _, r in live_df.iterrows()
     )
     best = leaderboard[0] if leaderboard else {}
     model_note = (f"Best model: {best.get('Model')} "
-                  f"(F1 {best.get('F1', 0):.2f}, ROC-AUC {best.get('ROC-AUC', 0):.2f}, "
-                  f"accuracy {best.get('Accuracy', 0):.2f})." if best else "")
+                  f"(directional accuracy {best.get('Dir. Acc', 0):.0%}, "
+                  f"d-prime {best.get('d-prime', 0):.2f}, MAE {best.get('MAE', 0):.2f})." if best else "")
 
     prompt = f"""You are a quantitative market analyst. Below are today's model-generated
 signals from TrendFlow, which predicts next-day price direction for tech equities and
@@ -42,16 +41,16 @@ crypto from social-media sentiment + price momentum.
 
 {model_note}
 
-SIGNALS (consensus = average predicted probability the asset rises tomorrow):
+SIGNALS (predicted next-day return per asset):
 {signal_lines}
 
 {sentiment_note}
 
 Write a sharp 3-paragraph briefing:
-1. The strongest BUY conviction(s) and what sentiment/buzz is driving them.
+1. The strongest BUY conviction(s) and what sentiment is driving them.
 2. The bearish / SELL signals and the caution flags.
-3. An honest reliability caveat — these models run at ~55-65% accuracy on a noisy
-   signal; state plainly how a trader should (and shouldn't) use this.
+3. An honest reliability caveat — these models run at ~65% directional accuracy on a
+   noisy signal; state plainly how a trader should (and shouldn't) use this.
 
 Tone: crisp, data-driven, no hype. Cite specific tickers and numbers."""
 

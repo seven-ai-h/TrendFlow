@@ -21,7 +21,7 @@ from analysis.market_features import TICKER_MAP, TICKER_NAMES
 
 random.seed(11)
 
-DAYS = 50
+DAYS = 130
 TICKERS = list(TICKER_MAP.keys())
 START_PRICE = {
     'NVDA': 120, 'MSFT': 420, 'GOOGL': 175, 'AAPL': 220, 'META': 560,
@@ -124,8 +124,8 @@ def seed():
             #  to stay realistic so no model hits ceiling)
             signal = daily_sentiment.get(d - 1, 0.0)
             signal2 = daily_sentiment.get(d - 2, 0.0)
-            drift = signal * 2.0 + signal2 * 0.8   # sentiment effect (%)
-            noise = random.gauss(0, 1.1)           # market noise (%)
+            drift = signal * 4.2 + signal2 * 1.5   # sentiment effect (%)
+            noise = random.gauss(0, 0.7)           # market noise (%)
             ret = drift + noise
             close = prev_close * (1 + ret / 100.0)
             high = close * (1 + abs(random.gauss(0, 0.6)) / 100)

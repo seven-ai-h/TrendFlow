@@ -1,258 +1,277 @@
 """
-Model Lab — the sentiment -> market comparison.
+Model Lab — regression edition.
 
-Trains six classifiers, organised into THREE algorithm families, on one shared
-task: *given today's social sentiment/buzz for a ticker plus its price context,
-will the asset close UP tomorrow?*  Every model sees the identical feature matrix
-and test split, so the leaderboard is a fair fight. Grouping by family keeps the
-dashboard tidy (three tidy columns instead of one long list).
+One task: predict each asset's NEXT-DAY RETURN (%) from its social sentiment,
+buzz and price context. Three models, each a clear step up in sophistication:
+
+  1. Linear Regression    — the transparent baseline (a weighted sum of features)
+  2. Random Forest        — non-linear ensemble of decision trees
+  3. LSTM (PyTorch)       — a recurrent net that reads the SEQUENCE of recent days
+
+We judge them on honest, domain-meaningful measures instead of a wall of charts:
+  * MAE / RMSE         — how far off the predicted return is, on average
+  * Directional acc.   — how often we get the up/down direction right
+  * d-prime (d')       — signal-detection separation of up-days from down-days
+  * Strategy Index     — grow $100 by following the model vs. buy-and-hold
 """
-import time
 import warnings
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.naive_bayes import GaussianNB
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.svm import SVC
-from sklearn.neural_network import MLPClassifier
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, roc_curve, confusion_matrix,
-)
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from analysis.market_features import (
-    build_market_dataset, build_live_snapshot, FEATURE_COLS, TICKER_NAMES,
-)
+from analysis.market_features import build_market_dataset, FEATURE_COLS, TICKER_NAMES
 
 warnings.filterwarnings("ignore")
 
-
-# ── Three model families (validated data-viz dark palette accents) ───────────
-def _model_categories():
-    return {
-        'Linear & Probabilistic': {
-            'color': '#3987e5',
-            'blurb': 'Fast, transparent baselines that draw straight or '
-                     'probabilistic decision boundaries.',
-            'models': {
-                'Logistic Regression': LogisticRegression(
-                    max_iter=1000, C=1.0, class_weight='balanced'),
-                'Naive Bayes': GaussianNB(),
-            },
-        },
-        'Tree Ensembles': {
-            'color': '#199e70',
-            'blurb': 'Combine many decision trees to capture non-linear '
-                     'feature interactions — strong tabular defaults.',
-            'models': {
-                'Random Forest': RandomForestClassifier(
-                    n_estimators=200, max_depth=6, random_state=42,
-                    n_jobs=-1, class_weight='balanced'),
-                'Gradient Boosting': GradientBoostingClassifier(
-                    n_estimators=150, max_depth=3, learning_rate=0.08,
-                    random_state=42),
-            },
-        },
-        'Kernel & Neural': {
-            'color': '#9085e9',
-            'blurb': 'Flexible non-linear learners that bend the decision '
-                     'boundary through kernels or hidden layers.',
-            'models': {
-                'SVM (RBF)': SVC(kernel='rbf', probability=True, C=2.0,
-                                 gamma='scale', random_state=42,
-                                 class_weight='balanced'),
-                'Neural Net (MLP)': MLPClassifier(
-                    hidden_layer_sizes=(32, 16), max_iter=800,
-                    alpha=1e-3, random_state=42),
-            },
-        },
-    }
-
-
-# per-model accent colours (2 per family, drawn from the family hue neighbourhood)
+SEQ_LEN = 5          # LSTM looks back one trading week
 MODEL_COLORS = {
-    'Logistic Regression': '#3987e5',
-    'Naive Bayes': '#6da7ec',
-    'Random Forest': '#199e70',
-    'Gradient Boosting': '#1bb37f',
-    'SVM (RBF)': '#9085e9',
-    'Neural Net (MLP)': '#c3b6f5',
+    "Linear Regression": "#3987e5",   # blue  — baseline
+    "Random Forest": "#199e70",       # green — ensemble
+    "LSTM": "#9085e9",                # violet — deep learning
 }
 
-MODEL_CATEGORY = {
-    'Logistic Regression': 'Linear & Probabilistic',
-    'Naive Bayes': 'Linear & Probabilistic',
-    'Random Forest': 'Tree Ensembles',
-    'Gradient Boosting': 'Tree Ensembles',
-    'SVM (RBF)': 'Kernel & Neural',
-    'Neural Net (MLP)': 'Kernel & Neural',
-}
-
-MODEL_EXPLANATIONS = {
-    'Logistic Regression': {
-        'how': 'Fits a weighted linear boundary and squashes it through a sigmoid to output probabilities.',
-        'strengths': 'Fast, interpretable coefficients, strong baseline, hard to overfit.',
-        'weaknesses': 'Only straight decision boundaries — misses non-linear interactions.',
-        'best_for': 'A transparent baseline whose weights you can read directly.',
+MODEL_EXPLAINERS = {
+    "Linear Regression": {
+        "tag": "Baseline · linear",
+        "how": "Fits one weight per feature and sums them. The simplest honest yardstick.",
+        "read": "If the fancy models can't beat this, the signal is mostly linear (or mostly noise).",
     },
-    'Naive Bayes': {
-        'how': 'Applies Bayes’ theorem assuming features are conditionally independent given the class.',
-        'strengths': 'Extremely fast, needs little data, surprisingly strong on noisy signals.',
-        'weaknesses': 'The independence assumption is usually false; probabilities can be poorly calibrated.',
-        'best_for': 'A quick probabilistic yardstick and high-dimensional sparse data.',
+    "Random Forest": {
+        "tag": "Ensemble · non-linear",
+        "how": "Averages hundreds of decision trees, each seeing a random slice of the data.",
+        "read": "Captures non-linear interactions the linear model can't — but can overfit noise.",
     },
-    'Random Forest': {
-        'how': 'Averages hundreds of decorrelated decision trees grown on bootstrap samples.',
-        'strengths': 'Handles non-linearity, robust to outliers, exposes feature importances.',
-        'weaknesses': 'Larger memory footprint, less interpretable than a single tree.',
-        'best_for': 'A strong, low-maintenance default on tabular data.',
-    },
-    'Gradient Boosting': {
-        'how': 'Builds trees sequentially, each correcting the residual errors of the last.',
-        'strengths': 'Often the top performer on tabular data; captures subtle interactions.',
-        'weaknesses': 'Sensitive to hyper-parameters, slower to train, can overfit noise.',
-        'best_for': 'Squeezing out maximum accuracy when you can tune it.',
-    },
-    'SVM (RBF)': {
-        'how': 'Projects data into a high-dimensional space and finds the maximum-margin separator.',
-        'strengths': 'Effective in high dimensions, flexible non-linear boundaries via the RBF kernel.',
-        'weaknesses': 'Scales poorly to large data, needs feature scaling, slower probabilities.',
-        'best_for': 'Clean, medium-sized datasets with complex boundaries.',
-    },
-    'Neural Net (MLP)': {
-        'how': 'Stacked layers of weighted sums + non-linear activations, trained by backprop.',
-        'strengths': 'Universal approximator — learns arbitrary non-linear functions given data.',
-        'weaknesses': 'Data-hungry, opaque, many knobs, can overfit small tabular sets.',
-        'best_for': 'Large datasets with rich non-linear structure.',
+    "LSTM": {
+        "tag": "Deep learning · sequential",
+        "how": "A recurrent neural net that reads the last 5 days in order, keeping a memory of momentum.",
+        "read": "The only model that sees sentiment *building over time* rather than one snapshot.",
     },
 }
 
 
-def train_all_models(session, days_back: int = 60) -> dict:
+# ── d-prime (signal detection) ───────────────────────────────────────────────
+def _d_prime(y_true, y_pred) -> float:
+    """
+    Treat 'predict a positive return' as a detector for 'day actually rose'.
+    d' = z(hit rate) - z(false-alarm rate). Higher = cleaner separation.
+    """
+    actual_up = np.array(y_true) > 0
+    pred_up = np.array(y_pred) > 0
+    if actual_up.sum() == 0 or (~actual_up).sum() == 0:
+        return float("nan")
+    hit = pred_up[actual_up].mean()
+    fa = pred_up[~actual_up].mean()
+    hit = min(max(hit, 0.01), 0.99)
+    fa = min(max(fa, 0.01), 0.99)
+    return float(norm.ppf(hit) - norm.ppf(fa))
+
+
+def _directional_accuracy(y_true, y_pred) -> float:
+    return float((np.sign(y_true) == np.sign(y_pred)).mean())
+
+
+# ── Build aligned tabular + sequence samples ─────────────────────────────────
+def _build_samples(session, days_back):
     ds = build_market_dataset(session, days_back=days_back)
-    if ds.empty or len(ds) < 40:
-        return {'ok': False,
-                'error': f"Need ~40+ training rows, have {0 if ds.empty else len(ds)}. "
-                         f"Run seed_data.py (demo) or test_hn_api.py (live)."}
-    if ds['will_rise'].nunique() < 2:
-        return {'ok': False, 'error': "Only one class present — not learnable."}
+    if ds.empty:
+        return None
+    ds = ds.sort_values(["ticker", "date"]).reset_index(drop=True)
 
-    X = ds[FEATURE_COLS].fillna(0).values
-    y = ds['will_rise'].values
+    X_tab, X_seq, y, dates, tickers = [], [], [], [], []
+    for ticker, grp in ds.groupby("ticker"):
+        grp = grp.sort_values("date").reset_index(drop=True)
+        feats = grp[FEATURE_COLS].fillna(0).values
+        targets = grp["next_return"].values
+        dts = grp["date"].values
+        for i in range(SEQ_LEN - 1, len(grp)):
+            if np.isnan(targets[i]):
+                continue
+            X_tab.append(feats[i])
+            X_seq.append(feats[i - SEQ_LEN + 1: i + 1])
+            y.append(targets[i])
+            dates.append(dts[i])
+            tickers.append(ticker)
+    if len(y) < 40:
+        return None
+    return (np.array(X_tab), np.array(X_seq), np.array(y),
+            np.array(dates), np.array(tickers))
 
-    scaler = StandardScaler()
-    Xs = scaler.fit_transform(X)
 
-    strat = y if np.bincount(y).min() >= 2 else None
-    X_tr, X_te, y_tr, y_te = train_test_split(
-        Xs, y, test_size=0.25, random_state=42, stratify=strat)
+# ── LSTM (PyTorch) ───────────────────────────────────────────────────────────
+def _train_lstm(X_seq_tr, y_tr, X_seq_te, input_size):
+    try:
+        import torch
+        import torch.nn as nn
+    except Exception:
+        return None  # torch unavailable -> caller skips LSTM
 
-    categories = _model_categories()
-    leaderboard, roc_data, conf_data, importances, fitted = [], {}, {}, {}, {}
+    torch.manual_seed(42)
+    np.random.seed(42)
 
-    for cat_name, cat in categories.items():
-        for name, model in cat['models'].items():
-            t0 = time.time()
-            model.fit(X_tr, y_tr)
-            train_ms = (time.time() - t0) * 1000
+    class LSTMReg(nn.Module):
+        def __init__(self, n_feat, hidden=48):
+            super().__init__()
+            self.lstm = nn.LSTM(n_feat, hidden, num_layers=1, batch_first=True)
+            self.drop = nn.Dropout(0.2)
+            self.head = nn.Sequential(nn.Linear(hidden, 24), nn.ReLU(), nn.Linear(24, 1))
 
-            y_pred = model.predict(X_te)
-            try:
-                y_proba = model.predict_proba(X_te)[:, 1]
-            except Exception:
-                y_proba = y_pred.astype(float)
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            return self.head(self.drop(out[:, -1, :])).squeeze(-1)
 
-            n_splits = min(5, max(2, int(np.bincount(y).min())))
-            try:
-                cv = cross_val_score(model, Xs, y, cv=n_splits, scoring='accuracy')
-                cv_mean, cv_std = float(cv.mean()), float(cv.std())
-            except Exception:
-                cv_mean, cv_std = float('nan'), float('nan')
-            try:
-                auc = roc_auc_score(y_te, y_proba)
-            except Exception:
-                auc = float('nan')
+    # standardise the target so MSE training is well-conditioned, then invert
+    y_mean, y_std = float(y_tr.mean()), float(y_tr.std() + 1e-8)
+    y_tr_n = (y_tr - y_mean) / y_std
 
-            leaderboard.append({
-                'Model': name, 'Category': cat_name,
-                'Accuracy': accuracy_score(y_te, y_pred),
-                'Precision': precision_score(y_te, y_pred, zero_division=0),
-                'Recall': recall_score(y_te, y_pred, zero_division=0),
-                'F1': f1_score(y_te, y_pred, zero_division=0),
-                'ROC-AUC': auc, 'CV Acc': cv_mean, 'CV Std': cv_std,
-                'Train (ms)': train_ms,
-            })
+    model = LSTMReg(input_size)
+    opt = torch.optim.Adam(model.parameters(), lr=0.008, weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.StepLR(opt, step_size=150, gamma=0.5)
+    lossf = nn.SmoothL1Loss()  # robust to outlier returns
 
-            try:
-                fpr, tpr, _ = roc_curve(y_te, y_proba)
-                roc_data[name] = {'fpr': fpr.tolist(), 'tpr': tpr.tolist(), 'auc': auc}
-            except Exception:
-                pass
+    Xtr = torch.tensor(X_seq_tr, dtype=torch.float32)
+    ytr = torch.tensor(y_tr_n, dtype=torch.float32)
 
-            conf_data[name] = confusion_matrix(y_te, y_pred, labels=[0, 1]).tolist()
+    model.train()
+    for _ in range(400):
+        opt.zero_grad()
+        loss = lossf(model(Xtr), ytr)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
+        sched.step()
 
-            if hasattr(model, 'feature_importances_'):
-                importances[name] = dict(zip(FEATURE_COLS, model.feature_importances_))
-            elif hasattr(model, 'coef_'):
-                importances[name] = dict(zip(FEATURE_COLS, np.abs(model.coef_[0])))
+    model.eval()
+    with torch.no_grad():
+        pred_n = model(torch.tensor(X_seq_te, dtype=torch.float32)).numpy()
+    return pred_n * y_std + y_mean  # back to return units
 
-            fitted[name] = model
 
-    leaderboard.sort(
-        key=lambda r: (r['F1'], r['ROC-AUC'] if r['ROC-AUC'] == r['ROC-AUC'] else 0),
-        reverse=True)
+# ── Main entry ───────────────────────────────────────────────────────────────
+def train_all_models(session, days_back: int = 60) -> dict:
+    samples = _build_samples(session, days_back)
+    if samples is None:
+        return {"ok": False, "error": "Not enough aligned history. Seed or collect more data."}
 
-    live = _live_predictions(session, fitted, scaler, days_back=min(days_back, 45))
+    X_tab, X_seq, y, dates, tickers = samples
+
+    # temporal split — train on the earlier period, test on the later (no leakage)
+    order = np.argsort(dates)
+    X_tab, X_seq, y, dates, tickers = (X_tab[order], X_seq[order], y[order],
+                                       dates[order], tickers[order])
+    split = int(len(y) * 0.75)
+    tr, te = slice(0, split), slice(split, None)
+
+    scaler = StandardScaler().fit(X_tab[tr])
+    Xtab_tr, Xtab_te = scaler.transform(X_tab[tr]), scaler.transform(X_tab[te])
+    n_feat = X_seq.shape[2]
+    flat = X_seq.reshape(-1, n_feat)
+    seq_scaled = scaler.transform(flat).reshape(X_seq.shape)
+    Xseq_tr, Xseq_te = seq_scaled[tr], seq_scaled[te]
+    y_tr, y_te = y[tr], y[te]
+    dates_te, tickers_te = dates[te], tickers[te]
+
+    preds = {}
+
+    lr = LinearRegression().fit(Xtab_tr, y_tr)
+    preds["Linear Regression"] = lr.predict(Xtab_te)
+
+    rf = RandomForestRegressor(n_estimators=200, max_depth=6, random_state=42, n_jobs=-1)
+    rf.fit(Xtab_tr, y_tr)
+    preds["Random Forest"] = rf.predict(Xtab_te)
+
+    lstm_pred = _train_lstm(Xseq_tr, y_tr, Xseq_te, n_feat)
+    torch_ok = lstm_pred is not None
+    if torch_ok:
+        preds["LSTM"] = lstm_pred
+
+    # ── Metrics + per-model test predictions ──────────────────────────────────
+    leaderboard, pred_vs_actual, strategy = [], {}, {}
+    strat_dates = None
+    for name, yp in preds.items():
+        leaderboard.append({
+            "Model": name,
+            "MAE": mean_absolute_error(y_te, yp),
+            "RMSE": float(np.sqrt(mean_squared_error(y_te, yp))),
+            "R2": r2_score(y_te, yp),
+            "Dir. Acc": _directional_accuracy(y_te, yp),
+            "d-prime": _d_prime(y_te, yp),
+        })
+        pred_vs_actual[name] = {"actual": y_te.tolist(), "pred": np.asarray(yp).tolist()}
+
+        # strategy: long-or-flat by predicted sign, averaged across tickers per date
+        dfp = pd.DataFrame({"date": dates_te, "ticker": tickers_te,
+                            "actual": y_te, "pred": yp})
+        dfp["strat_ret"] = np.where(dfp["pred"] > 0, dfp["actual"], 0.0)
+        daily = dfp.groupby("date").agg(strat=("strat_ret", "mean"),
+                                        bh=("actual", "mean")).reset_index()
+        daily = daily.sort_values("date")
+        idx = 100 * np.cumprod(1 + daily["strat"].values / 100)
+        strategy[name] = idx.tolist()
+        if strat_dates is None:
+            strat_dates = pd.to_datetime(daily["date"]).dt.strftime("%Y-%m-%d").tolist()
+            buyhold = 100 * np.cumprod(1 + daily["bh"].values / 100)
+
+    # rank by directional accuracy then d-prime (what a trader cares about)
+    leaderboard.sort(key=lambda r: (r["Dir. Acc"],
+                                    r["d-prime"] if r["d-prime"] == r["d-prime"] else -9),
+                     reverse=True)
+
+    # feature importance from RF (single, clear chart)
+    importance = dict(zip(FEATURE_COLS, rf.feature_importances_))
+
+    live = _live_predictions(session, {"Linear Regression": lr, "Random Forest": rf},
+                             scaler, days_back)
 
     return {
-        'ok': True, 'error': None,
-        'n_samples': len(ds),
-        'n_tickers': ds['ticker'].nunique(),
-        'class_balance': {'down': int((y == 0).sum()), 'up': int((y == 1).sum())},
-        'leaderboard': leaderboard,
-        'categories': {k: {'color': v['color'], 'blurb': v['blurb'],
-                           'models': list(v['models'].keys())}
-                       for k, v in categories.items()},
-        'roc': roc_data, 'confusion': conf_data,
-        'feature_importance': importances, 'feature_cols': FEATURE_COLS,
-        'models': fitted, 'scaler': scaler, 'live': live,
+        "ok": True, "error": None,
+        "n_samples": len(y), "n_test": int(len(y_te)),
+        "n_tickers": len(set(tickers)),
+        "torch_ok": torch_ok,
+        "leaderboard": leaderboard,
+        "pred_vs_actual": pred_vs_actual,
+        "strategy": strategy, "strategy_dates": strat_dates,
+        "buyhold": list(buyhold),
+        "importance": importance,
+        "feature_cols": FEATURE_COLS,
+        "live": live,
     }
 
 
-def _live_predictions(session, fitted, scaler, days_back=45) -> pd.DataFrame:
-    snap = build_live_snapshot(session, days_back=days_back)
-    if snap.empty:
+def _live_predictions(session, tab_models, scaler, days_back) -> pd.DataFrame:
+    ds = build_market_dataset(session, days_back=days_back)
+    if ds.empty:
         return pd.DataFrame()
-    Xs = scaler.transform(snap[FEATURE_COLS].fillna(0).values)
-    out = snap[['ticker', 'name', 'avg_sentiment', 'buzz']].copy()
-    prob_cols = []
-    for name, model in fitted.items():
-        try:
-            proba = model.predict_proba(Xs)[:, 1]
-        except Exception:
-            proba = model.predict(Xs).astype(float)
-        out[name] = (proba * 100).round(1)
-        prob_cols.append(name)
-    out['Consensus'] = out[prob_cols].mean(axis=1).round(1)
-    out['Signal'] = out['Consensus'].apply(
-        lambda v: 'BUY' if v >= 55 else ('SELL' if v <= 45 else 'HOLD'))
-    out = out.sort_values('Consensus', ascending=False).reset_index(drop=True)
-    return out
+    latest = ds.sort_values("date").groupby("ticker").tail(1).reset_index(drop=True)
+    Xs = scaler.transform(latest[FEATURE_COLS].fillna(0).values)
+    rf = tab_models["Random Forest"]
+    lr = tab_models["Linear Regression"]
+    pred = (rf.predict(Xs) + lr.predict(Xs)) / 2  # ensemble of the two tabular models
+    out = pd.DataFrame({
+        "ticker": latest["ticker"],
+        "name": latest["ticker"].map(TICKER_NAMES).fillna(latest["ticker"]),
+        "avg_sentiment": latest["avg_sentiment"].round(2),
+        "pred_return": np.round(pred, 2),
+    })
+    out["Signal"] = out["pred_return"].apply(
+        lambda v: "BUY" if v > 0.15 else ("SELL" if v < -0.15 else "HOLD"))
+    return out.sort_values("pred_return", ascending=False).reset_index(drop=True)
 
 
 if __name__ == "__main__":
     from database.db_setup import getSession
     r = train_all_models(getSession())
-    if not r['ok']:
-        print("ERROR:", r['error'])
+    if not r["ok"]:
+        print("ERROR:", r["error"])
     else:
-        print(f"Trained on {r['n_samples']} samples, {r['n_tickers']} tickers, "
-              f"balance={r['class_balance']}\n")
-        lb = pd.DataFrame(r['leaderboard'])
-        print(lb[['Model', 'Category', 'Accuracy', 'F1', 'ROC-AUC', 'CV Acc']].to_string(index=False))
-        print("\nLive signals:")
-        print(r['live'][['ticker', 'name', 'avg_sentiment', 'Consensus', 'Signal']].to_string(index=False))
+        print(f"{r['n_samples']} samples, {r['n_test']} test, torch={r['torch_ok']}\n")
+        print(pd.DataFrame(r["leaderboard"]).to_string(index=False))
+        print("\nFinal strategy index:")
+        for m, idx in r["strategy"].items():
+            print(f"  {m:18s} {idx[-1]:.1f}  (buy&hold {r['buyhold'][-1]:.1f})")
+        print("\nLive:")
+        print(r["live"].to_string(index=False))
