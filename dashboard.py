@@ -2,6 +2,9 @@ import os
 from datetime import datetime, timedelta
 from collections import Counter
 
+from dotenv import load_dotenv
+load_dotenv()  # read ANTHROPIC_API_KEY / NEWS_API_KEY etc. from a local .env
+
 import numpy as np
 import pandas as pd
 import streamlit as st
