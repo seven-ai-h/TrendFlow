@@ -8,11 +8,7 @@ dashboard falls back to the synthetic prices written by seed_data.py.
 """
 from datetime import datetime, timedelta
 
-# The universe TrendFlow tracks — tech equities + major crypto.
-TRACKED_TICKERS = [
-    'NVDA', 'MSFT', 'GOOGL', 'AAPL', 'META', 'AMZN', 'TSLA', 'AMD',
-    'BTC-USD', 'ETH-USD',
-]
+from config import TRACKED_TICKERS, TICKER_NAMES  # single source of truth
 
 
 def collect_market_data(tickers=None, days_back: int = 60) -> list:
@@ -67,3 +63,70 @@ def collect_market_data(tickers=None, days_back: int = 60) -> list:
 
     print(f"  Market: {len(rows)} total price rows")
     return rows
+
+
+def _news_item_fields(item: dict):
+    """Normalise a yfinance news item across API versions. Returns (title, url, ts)."""
+    # Newer yfinance nests everything under 'content'
+    content = item.get('content', item)
+    title = content.get('title') or item.get('title', '')
+
+    # URL can live in several places depending on version
+    url = ''
+    cu = content.get('canonicalUrl') or content.get('clickThroughUrl')
+    if isinstance(cu, dict):
+        url = cu.get('url', '')
+    url = url or content.get('link') or item.get('link', '')
+
+    # timestamp: epoch seconds (old) or ISO string (new)
+    ts = datetime.utcnow()
+    if item.get('providerPublishTime'):
+        try:
+            ts = datetime.utcfromtimestamp(int(item['providerPublishTime']))
+        except Exception:
+            pass
+    elif content.get('pubDate'):
+        try:
+            ts = datetime.fromisoformat(content['pubDate'].replace('Z', '+00:00')).replace(tzinfo=None)
+        except Exception:
+            pass
+    return title.strip(), url, ts
+
+
+def collect_ticker_news(tickers=None, max_per_ticker: int = 15) -> list:
+    """
+    Fetch real recent headlines PER ticker via yfinance — already tagged to the
+    asset, so no keyword-matching guesswork and no API key. Returns Story dicts.
+    """
+    tickers = tickers or TRACKED_TICKERS
+    try:
+        import yfinance as yf
+    except ImportError:
+        print("  yfinance not installed — skipping ticker news.")
+        return []
+
+    results = []
+    for ticker in tickers:
+        try:
+            items = yf.Ticker(ticker).news or []
+            got = 0
+            for item in items[:max_per_ticker]:
+                title, url, ts = _news_item_fields(item)
+                if not title:
+                    continue
+                results.append({
+                    'title': title,
+                    'url': url,
+                    'score': 0,
+                    'num_comments': 0,
+                    'platform': 'finance',
+                    '_ticker': ticker,       # already known — no matching needed
+                    '_timestamp': ts,
+                })
+                got += 1
+            print(f"  {ticker} news: {got} headlines")
+        except Exception as e:
+            print(f"  {ticker} news error: {e}")
+
+    print(f"  Ticker news: {len(results)} total headlines")
+    return results

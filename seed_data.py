@@ -17,16 +17,12 @@ from datetime import datetime, timedelta
 from database.db_setup import db_connection, getSession
 from database.models import Story, Article, MarketData, PipelineRun, Keyword
 from analysis.sentiment import score_sentiment
-from analysis.market_features import TICKER_MAP, TICKER_NAMES
+from config import TRACKED_TICKERS, TICKER_NAMES, TICKER_KEYWORDS, seed_start_price
 
 random.seed(11)
 
 DAYS = 130
-TICKERS = list(TICKER_MAP.keys())
-START_PRICE = {
-    'NVDA': 120, 'MSFT': 420, 'GOOGL': 175, 'AAPL': 220, 'META': 560,
-    'AMZN': 185, 'TSLA': 250, 'AMD': 160, 'BTC-USD': 65000, 'ETH-USD': 3400,
-}
+TICKERS = TRACKED_TICKERS
 
 # Headline templates by tone. {name}/{kw} filled per ticker.
 BULLISH = [
@@ -53,11 +49,14 @@ NEUTRAL = [
     "{name} hires new executive to lead {kw} division",
 ]
 
-KW_FOR = {
-    'NVDA': 'AI chip', 'MSFT': 'cloud', 'GOOGL': 'Gemini', 'AAPL': 'iPhone',
-    'META': 'Llama', 'AMZN': 'AWS', 'TSLA': 'EV', 'AMD': 'Ryzen',
-    'BTC-USD': 'crypto', 'ETH-USD': 'Ethereum',
-}
+def _display_keyword(ticker: str, name: str) -> str:
+    """Pick a natural filler keyword for headline templates from the config
+    keywords — the first one that isn't just the company name, else 'tech'."""
+    name_low = name.lower()
+    for kw in TICKER_KEYWORDS.get(ticker, []):
+        if kw not in name_low and name_low not in kw and len(kw) > 2:
+            return kw
+    return "tech"
 
 
 def seed():
@@ -78,8 +77,8 @@ def seed():
 
     for ticker in TICKERS:
         name = TICKER_NAMES[ticker]
-        kw = KW_FOR[ticker]
-        price = float(START_PRICE[ticker])
+        kw = _display_keyword(ticker, name)
+        price = seed_start_price(ticker)
         # each ticker has its own daily sentiment "mood" random walk
         mood = 0.0
         daily_sentiment = {}

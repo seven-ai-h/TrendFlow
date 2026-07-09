@@ -9,7 +9,7 @@ from data_collection.reddit_collector import collect_reddit
 from data_collection.devto_collector import collect_devto
 from data_collection.github_collector import collect_github_trending
 from data_collection.rss_collector import collect_rss
-from data_collection.market_collector import collect_market_data
+from data_collection.market_collector import collect_market_data, collect_ticker_news
 from collections import Counter
 
 
@@ -37,7 +37,7 @@ def _save_stories(session, posts, platform_label, existing_urls: set):
             url=url,
             platform=platform_label,
             sentiment=score_sentiment(post['title']),
-            timestamp=datetime.utcnow(),
+            timestamp=post.get('_timestamp') or datetime.utcnow(),
         )
         session.add(story)
         new_count += 1
@@ -221,6 +221,23 @@ def run_pipeline():
         print(f"Saved {new_articles} new news articles\n")
     except Exception as e:
         print(f"NewsAPI error (check NEWS_API_KEY in .env): {e}\n")
+
+    # ── Per-ticker financial news (yfinance) — real, already ticker-tagged ─────
+    print("=== Ticker News (yfinance) ===")
+    try:
+        news_posts = collect_ticker_news()
+        # keep only genuinely new URLs, score sentiment, tag platform 'finance'
+        fresh = [p for p in news_posts if not p.get('url') or p['url'] not in existing_urls]
+        entities, new_count = _save_stories(session, fresh, 'finance', existing_urls)
+        all_entities.extend(entities)
+        _save_keywords(session, entities, 'finance')
+        session.commit()
+        total_stories += new_count
+        if new_count:
+            sources_run.append('finance')
+        print(f"Saved {new_count} new ticker headlines\n")
+    except Exception as e:
+        print(f"Ticker news error: {e}\n")
 
     # ── Market prices ─────────────────────────────────────────────────────────
     if _collect_market(session):

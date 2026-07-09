@@ -14,27 +14,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 from database.models import Story, MarketData
-
-# ── Keyword -> ticker mapping ────────────────────────────────────────────────
-# A story mentioning any of these terms contributes to that ticker's daily buzz.
-TICKER_MAP = {
-    'NVDA': ['nvidia', 'nvda', 'gpu', 'cuda', 'jensen huang', 'geforce', 'h100', 'blackwell'],
-    'MSFT': ['microsoft', 'msft', 'azure', 'copilot', 'openai', 'gpt', 'chatgpt', 'windows'],
-    'GOOGL': ['google', 'googl', 'alphabet', 'gemini', 'deepmind', 'android', 'chrome', 'waymo'],
-    'AAPL': ['apple', 'aapl', 'iphone', 'ios', 'macos', 'ipad', 'vision pro', 'mac'],
-    'META': ['meta', 'facebook', 'instagram', 'llama', 'metaverse', 'whatsapp', 'zuckerberg'],
-    'AMZN': ['amazon', 'amzn', 'aws', 'bezos', 'prime', 'alexa'],
-    'TSLA': ['tesla', 'tsla', 'musk', 'electric vehicle', 'autopilot', 'cybertruck', 'ev'],
-    'AMD': ['amd', 'ryzen', 'radeon', 'epyc', 'lisa su'],
-    'BTC-USD': ['bitcoin', 'btc', 'crypto', 'satoshi', 'halving'],
-    'ETH-USD': ['ethereum', 'eth', 'ether', 'vitalik', 'smart contract'],
-}
-
-TICKER_NAMES = {
-    'NVDA': 'NVIDIA', 'MSFT': 'Microsoft', 'GOOGL': 'Alphabet', 'AAPL': 'Apple',
-    'META': 'Meta', 'AMZN': 'Amazon', 'TSLA': 'Tesla', 'AMD': 'AMD',
-    'BTC-USD': 'Bitcoin', 'ETH-USD': 'Ethereum',
-}
+from config import TICKER_KEYWORDS as TICKER_MAP, TICKER_NAMES  # single source of truth
 
 FEATURE_COLS = [
     'buzz', 'buzz_velocity', 'avg_sentiment', 'sentiment_std', 'bullish_ratio',
