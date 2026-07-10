@@ -13,7 +13,7 @@ from database.db_setup import getSession
 from database.models import Story, MarketData
 from analysis.model_lab import (
     train_all_models, MODEL_EXPLAINERS,
-    compute_leaderboard, compute_strategy, compute_pred_vs_actual,
+    compute_leaderboard, compute_strategy, compute_pred_vs_actual, compute_backtest_stats,
 )
 from config import TICKER_NAMES
 
@@ -175,6 +175,24 @@ def page_models():
                       yaxis_title="Index (start = 100)")
     st.plotly_chart(sfig(fig, 400), use_container_width=True)
 
+    # Backtest rigor
+    stats = compute_backtest_stats(rows, names)
+    if stats:
+        st.markdown("**Backtest stats** (long-or-flat strategy, per model)")
+        bt = pd.DataFrame([
+            {"Model": m, "Total return": f"{s['total_return']:+.1f}%",
+             "Sharpe": f"{s['sharpe']:.1f}", "Max drawdown": f"{s['max_drawdown']:.1f}%",
+             "Win rate": f"{s['win_rate']:.0f}%", "Positions": s["positions"]}
+            for m, s in stats.items()])
+        st.dataframe(bt, use_container_width=True, hide_index=True)
+        st.markdown(
+            "<div class='note'>Sharpe = return per unit of risk (annualised) · Max "
+            "drawdown = worst peak-to-trough dip · Win rate = share of green days. "
+            "<b>Caveat:</b> these are computed on a short, clean <i>synthetic</i> window "
+            "and are flattering — real strategies land at Sharpe ~0.5–2. The point is "
+            "TrendFlow computes the right risk-adjusted metrics, not that this is "
+            "a money-printer.</div>", unsafe_allow_html=True)
+
     # Predicted vs actual
     st.subheader("🎯 Predicted vs. actual return")
     st.markdown("<div class='note'>Each dot is one test day. The tighter the cloud hugs "
@@ -246,16 +264,26 @@ def page_predictions():
                           xaxis=dict(range=[lo - pad, hi + pad]))
         st.plotly_chart(sfig(fig, 460), use_container_width=True)
     with colR:
-        st.markdown("#### Signals")
+        st.markdown("#### Signals & why")
+        drivers = lab.get("drivers", {})
         for _, r in live.iterrows():
             pill = r["Signal"].lower()
+            # top drivers for this asset (sign-aware colouring)
+            drv = drivers.get(r["ticker"], [])[:3]
+            drv_html = ""
+            for label, c in drv:
+                clr = GOOD if c > 0 else BAD
+                arrow = "▲" if c > 0 else "▼"
+                drv_html += (f"<div style='font-size:0.78rem;color:{INK2}'>"
+                             f"<span style='color:{clr}'>{arrow}</span> {label}</div>")
             st.markdown(
                 f"<div class='card' style='padding:10px 14px;margin-bottom:8px'>"
                 f"<span style='font-weight:700'>{r['name']}</span> "
                 f"<span class='pill {pill}'>{r['Signal']}</span><br>"
                 f"<span style='color:{INK2};font-size:0.84rem'>"
                 f"predicted <b>{r['pred_return']:+.2f}%</b> · "
-                f"sentiment {r['avg_sentiment']:+.2f}</span></div>",
+                f"sentiment {r['avg_sentiment']:+.2f}</span>"
+                f"<div style='margin-top:6px'>{drv_html}</div></div>",
                 unsafe_allow_html=True)
 
     st.markdown(f"<div class='note'>⚠️ Not financial advice. On a noisy real-world "
@@ -306,10 +334,96 @@ def page_sentiment():
                         unsafe_allow_html=True)
 
 
+# ═══════════════════════════ PAGE 4 · HOW IT WORKS ═══════════════════════════
+def page_howitworks():
+    from analysis.market_features import tickers_in_text, FEATURE_LABELS
+    st.title("🔍 How it works")
+    st.markdown("<div class='lede'>Follow one real prediction from raw headlines all the "
+                "way to a number — no black box.</div>", unsafe_allow_html=True)
+
+    lab = get_lab()
+    if not lab["ok"]:
+        st.warning(f"⚠️ {lab['error']}")
+        return
+
+    live = lab["live"]
+    live = live[live["ticker"].isin(SELECTED)] if SELECTED else live
+    if live.empty:
+        st.info("👈 Select at least one asset in the sidebar.")
+        return
+
+    name = st.selectbox("Pick an asset to trace", live["name"].tolist())
+    row = live[live["name"] == name].iloc[0]
+    ticker = row["ticker"]
+    snap = lab["snapshot"]
+    srow = snap[snap["ticker"] == ticker].iloc[0] if not snap.empty else None
+
+    # ── Step 1: raw headlines + their sentiment ───────────────────────────────
+    st.markdown(f"### 1 · Collect headlines about {name}")
+    st.markdown("<div class='note'>Each headline is scored −1 (bearish) → +1 (bullish) "
+                "by VADER + a finance word-list.</div>", unsafe_allow_html=True)
+    heads = [s for s in session.query(Story).order_by(Story.timestamp.desc()).limit(4000).all()
+             if ticker in tickers_in_text(s.title or "")][:6]
+    if heads:
+        for s in heads:
+            v = s.sentiment or 0.0
+            clr = GOOD if v > 0.05 else (BAD if v < -0.05 else MUTED)
+            st.markdown(f"<div class='note' style='margin:3px 0'>"
+                        f"<b style='color:{clr}'>{v:+.2f}</b> &nbsp;{s.title}</div>",
+                        unsafe_allow_html=True)
+    else:
+        st.caption("No recent headlines matched this asset.")
+
+    # ── Step 2: aggregate into a feature vector ───────────────────────────────
+    st.markdown("### 2 · Aggregate the day into a feature vector")
+    st.markdown("<div class='note'>Headlines + prices for the day become the numbers the "
+                "models actually see.</div>", unsafe_allow_html=True)
+    if srow is not None:
+        show_feats = ["avg_sentiment", "sentiment_momentum", "buzz", "cross_sec_rank",
+                      "momentum_3d", "market_return"]
+        fcols = st.columns(3)
+        for i, f in enumerate(show_feats):
+            with fcols[i % 3]:
+                st.metric(FEATURE_LABELS.get(f, f), f"{float(srow[f]):.2f}")
+
+    # ── Step 3: model turns it into a prediction ──────────────────────────────
+    st.markdown("### 3 · The model turns that into a predicted return")
+    pill = row["Signal"].lower()
+    st.markdown(
+        f"<div class='card'><span style='font-size:1.4rem;font-weight:800'>"
+        f"{row['pred_return']:+.2f}%</span> &nbsp;predicted next-day return &nbsp;"
+        f"<span class='pill {pill}'>{row['Signal']}</span></div>", unsafe_allow_html=True)
+
+    drv = lab.get("drivers", {}).get(ticker, [])
+    if drv:
+        st.markdown("<div class='note'>What pushed the number (linear model's "
+                    "contribution per feature, in return-% points):</div>",
+                    unsafe_allow_html=True)
+        dd = pd.DataFrame(drv, columns=["Feature", "contrib"])
+        fig = go.Figure(go.Bar(
+            x=dd["contrib"], y=dd["Feature"], orientation="h",
+            marker_color=[GOOD if c > 0 else BAD for c in dd["contrib"]],
+            text=[f"{c:+.2f}" for c in dd["contrib"]], textposition="outside"))
+        fig.add_vline(x=0, line_color=MUTED)
+        fig.update_layout(title="Top drivers of this prediction",
+                          yaxis=dict(autorange="reversed"), xaxis_title="Contribution (% pts)")
+        st.plotly_chart(sfig(fig, 260), use_container_width=True)
+
+    # ── Step 4: the pipeline in one line ──────────────────────────────────────
+    st.markdown("### 4 · The whole pipeline")
+    st.markdown(
+        f"<div class='note'>Headlines → <b>sentiment score</b> → daily <b>feature "
+        f"vector</b> (sentiment + buzz + price momentum + market context) → "
+        f"<b>3 models</b> (Linear · Random Forest · LSTM) → <b>predicted return</b> → "
+        f"<b>{row['Signal']}</b>. The models are trained only on past days and tested on "
+        f"later ones, so nothing here peeks at the future.</div>", unsafe_allow_html=True)
+
+
 # ── Native sidebar navigation ─────────────────────────────────────────────────
 nav = st.navigation([
     st.Page(page_models, title="Models", icon="🧪", default=True),
     st.Page(page_predictions, title="Predictions", icon="📡"),
     st.Page(page_sentiment, title="Sentiment", icon="💬"),
+    st.Page(page_howitworks, title="How it works", icon="🔍"),
 ])
 nav.run()

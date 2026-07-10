@@ -18,9 +18,29 @@ from config import TICKER_KEYWORDS as TICKER_MAP, TICKER_NAMES  # single source 
 
 FEATURE_COLS = [
     'buzz', 'buzz_velocity', 'avg_sentiment', 'sentiment_std', 'bullish_ratio',
-    'weighted_sentiment', 'prev_return', 'momentum_3d', 'volume_ratio',
-    'volatility_3d', 'day_of_week',
+    'weighted_sentiment', 'sentiment_momentum', 'sentiment_volatility',
+    'cross_sec_rank', 'prev_return', 'momentum_3d', 'volume_ratio',
+    'volatility_3d', 'market_return', 'day_of_week',
 ]
+
+# Human-readable labels for the dashboard's "why" / how-it-works views
+FEATURE_LABELS = {
+    'buzz': 'headline volume',
+    'buzz_velocity': 'buzz vs recent avg',
+    'avg_sentiment': 'avg sentiment',
+    'sentiment_std': 'sentiment spread',
+    'bullish_ratio': 'share of bullish headlines',
+    'weighted_sentiment': 'engagement-weighted sentiment',
+    'sentiment_momentum': 'sentiment momentum (accelerating?)',
+    'sentiment_volatility': 'sentiment volatility',
+    'cross_sec_rank': 'sentiment rank vs other assets',
+    'prev_return': 'yesterday’s return',
+    'momentum_3d': '3-day price momentum',
+    'volume_ratio': 'volume vs 5-day avg',
+    'volatility_3d': '3-day volatility',
+    'market_return': 'whole-market move today',
+    'day_of_week': 'day of week',
+}
 
 
 def tickers_in_text(text: str) -> list:
@@ -101,6 +121,14 @@ def build_market_dataset(session, days_back: int = 60) -> pd.DataFrame:
     social['date'] = pd.to_datetime(social['date'])
     prices['date'] = pd.to_datetime(prices['date'])
 
+    # ── Cross-asset context (computed across ALL tickers per day) ─────────────
+    # market_return = equal-weight universe return that day (a market-context
+    # feature: "is the whole market up today?"). Known at close of day d → no leak.
+    market_ret = prices.groupby('date')['return_pct'].mean()
+    # cross_sec_rank = percentile rank of this asset's sentiment vs all others today
+    social['cross_sec_rank'] = social.groupby('date')['avg_sentiment'].rank(pct=True)
+    rank_lookup = social.set_index(['ticker', 'date'])['cross_sec_rank'].to_dict()
+
     samples = []
     for ticker, pgrp in prices.groupby('ticker'):
         pgrp = pgrp.sort_values('date').reset_index(drop=True)
@@ -114,8 +142,12 @@ def build_market_dataset(session, days_back: int = 60) -> pd.DataFrame:
         pgrp['next_return'] = pgrp['return_pct'].shift(-1)
 
         sgrp = social[social['ticker'] == ticker].sort_values('date').set_index('date')
-        buzz_series = sgrp['buzz'] if not sgrp.empty else pd.Series(dtype=float)
-        buzz_ma = buzz_series.rolling(3, min_periods=1).mean() if not sgrp.empty else buzz_series
+        if not sgrp.empty:
+            buzz_ma = sgrp['buzz'].rolling(3, min_periods=1).mean()
+            # sentiment momentum: today vs the mean of the prior up-to-3 days
+            sent_prev_ma = sgrp['avg_sentiment'].shift(1).rolling(3, min_periods=1).mean()
+            sent_mom = (sgrp['avg_sentiment'] - sent_prev_ma).fillna(0)
+            sent_vol = sgrp['avg_sentiment'].rolling(3, min_periods=1).std().fillna(0)
 
         for _, prow in pgrp.iterrows():
             if pd.isna(prow['next_return']):
@@ -132,8 +164,13 @@ def build_market_dataset(session, days_back: int = 60) -> pd.DataFrame:
                 sent_std = float(srow['sentiment_std'])
                 bull = float(srow['bullish_ratio'])
                 wsent = float(srow['weighted_sentiment'])
+                s_mom = float(sent_mom.loc[d]) if d in sent_mom.index else 0.0
+                s_vol = float(sent_vol.loc[d]) if d in sent_vol.index else 0.0
+                x_rank = float(rank_lookup.get((ticker, d), 0.5))
             else:
                 buzz = buzz_vel = avg_sent = sent_std = bull = wsent = 0.0
+                s_mom = s_vol = 0.0
+                x_rank = 0.5  # neutral rank when no coverage
 
             samples.append({
                 'ticker': ticker,
@@ -144,10 +181,14 @@ def build_market_dataset(session, days_back: int = 60) -> pd.DataFrame:
                 'sentiment_std': sent_std,
                 'bullish_ratio': bull,
                 'weighted_sentiment': wsent,
+                'sentiment_momentum': s_mom,
+                'sentiment_volatility': s_vol,
+                'cross_sec_rank': x_rank,
                 'prev_return': prow['prev_return'],
                 'momentum_3d': prow['momentum_3d'],
                 'volume_ratio': prow['volume_ratio'],
                 'volatility_3d': prow['volatility_3d'],
+                'market_return': float(market_ret.get(d, 0.0)),
                 'day_of_week': pd.Timestamp(d).dayofweek,
                 'next_return': prow['next_return'],
                 'will_rise': 1 if prow['next_return'] > 0 else 0,

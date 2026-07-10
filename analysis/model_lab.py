@@ -221,8 +221,9 @@ def train_all_models(session, days_back: int = 60) -> dict:
     # feature importance from RF (single, clear chart)
     importance = dict(zip(FEATURE_COLS, rf.feature_importances_))
 
-    live = _live_predictions(session, {"Linear Regression": lr, "Random Forest": rf},
-                             scaler, days_back)
+    live, drivers, snapshot = _live_predictions(
+        session, {"Linear Regression": lr, "Random Forest": rf}, scaler, days_back)
+    backtest = compute_backtest_stats(test_records, model_names)
 
     return {
         "ok": True, "error": None,
@@ -234,10 +235,13 @@ def train_all_models(session, days_back: int = 60) -> dict:
         "pred_vs_actual": pred_vs_actual,
         "strategy": strategy, "strategy_dates": strat_dates,
         "buyhold": list(buyhold),
+        "backtest": backtest,
         "test_records": test_records,
         "importance": importance,
         "feature_cols": FEATURE_COLS,
         "live": live,
+        "drivers": drivers,
+        "snapshot": snapshot,
     }
 
 
@@ -252,6 +256,35 @@ def compute_pred_vs_actual(records, model_names) -> dict:
         if col in df.columns:
             out[name] = {"actual": df["actual"].tolist(), "pred": df[col].tolist()}
     return out
+
+
+def compute_backtest_stats(records, model_names) -> dict:
+    """Quant-grade stats for the long-or-flat strategy, per model, from the daily
+    portfolio returns: annualised Sharpe, max drawdown, win rate, positions taken."""
+    df = pd.DataFrame(records)
+    stats = {}
+    if df.empty:
+        return stats
+    for name in model_names:
+        col = f"pred::{name}"
+        if col not in df.columns:
+            continue
+        d = df[["date", "actual", col]].copy()
+        d["sret"] = np.where(d[col] > 0, d["actual"], 0.0) / 100.0  # daily % -> decimal
+        daily = d.groupby("date")["sret"].mean().sort_index()
+        eq = (1 + daily).cumprod()
+        run_max = eq.cummax()
+        max_dd = float((eq / run_max - 1).min()) if len(eq) else 0.0
+        sd = daily.std()
+        sharpe = float(daily.mean() / sd * np.sqrt(252)) if sd and sd > 0 else 0.0
+        stats[name] = {
+            "sharpe": sharpe,
+            "max_drawdown": abs(max_dd) * 100,           # %
+            "win_rate": float((daily > 0).mean()) * 100,  # % of days green
+            "positions": int((d[col] > 0).sum()),         # long bets taken
+            "total_return": float(eq.iloc[-1] - 1) * 100 if len(eq) else 0.0,
+        }
+    return stats
 
 
 def compute_leaderboard(records, model_names) -> list:
@@ -303,15 +336,31 @@ def compute_strategy(records, model_names):
     return dates, strategy, buyhold
 
 
-def _live_predictions(session, tab_models, scaler, days_back) -> pd.DataFrame:
+def _live_predictions(session, tab_models, scaler, days_back):
+    """Return (predictions_df, drivers_dict, snapshot_df).
+
+    drivers_dict[ticker] = list of (feature, contribution%) sorted by |impact| —
+    the linear model's additive contribution to the predicted return, so every
+    call has a transparent 'why'. snapshot_df carries the raw feature values.
+    """
+    from analysis.market_features import FEATURE_LABELS
     ds = build_market_dataset(session, days_back=days_back)
     if ds.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}, pd.DataFrame()
     latest = ds.sort_values("date").groupby("ticker").tail(1).reset_index(drop=True)
-    Xs = scaler.transform(latest[FEATURE_COLS].fillna(0).values)
+    X = latest[FEATURE_COLS].fillna(0).values
+    Xs = scaler.transform(X)
     rf = tab_models["Random Forest"]
     lr = tab_models["Linear Regression"]
     pred = (rf.predict(Xs) + lr.predict(Xs)) / 2  # ensemble of the two tabular models
+
+    # Per-asset drivers via the linear model: contribution_i = coef_i * scaled_x_i
+    contribs = Xs * lr.coef_  # shape (n_assets, n_features)
+    drivers = {}
+    for i, tk in enumerate(latest["ticker"]):
+        pairs = sorted(zip(FEATURE_COLS, contribs[i]), key=lambda p: abs(p[1]), reverse=True)
+        drivers[tk] = [(FEATURE_LABELS.get(f, f), float(c)) for f, c in pairs[:4]]
+
     out = pd.DataFrame({
         "ticker": latest["ticker"],
         "name": latest["ticker"].map(TICKER_NAMES).fillna(latest["ticker"]),
@@ -320,7 +369,8 @@ def _live_predictions(session, tab_models, scaler, days_back) -> pd.DataFrame:
     })
     out["Signal"] = out["pred_return"].apply(
         lambda v: "BUY" if v > 0.15 else ("SELL" if v < -0.15 else "HOLD"))
-    return out.sort_values("pred_return", ascending=False).reset_index(drop=True)
+    out = out.sort_values("pred_return", ascending=False).reset_index(drop=True)
+    return out, drivers, latest
 
 
 if __name__ == "__main__":
