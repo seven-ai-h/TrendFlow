@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+from sqlalchemy import func
 from database.db_setup import getSession
 from database.models import Story, MarketData
 from analysis.model_lab import (
@@ -77,6 +78,24 @@ def _data_version():
 
 def get_lab():
     return _train_cached(LOOKBACK, _data_version())
+
+
+@st.cache_data(show_spinner=False)
+def _headlines_by_ticker(selected, _ver, limit_per=6):
+    """Most-recent scored headlines per ticker, for the evidence panels."""
+    from analysis.market_features import tickers_in_text
+    out = {}
+    stories = session.query(Story).order_by(Story.timestamp.desc()).limit(5000).all()
+    for s in stories:
+        src = (s.platform or "web").replace("hackernews", "Hacker News").replace(
+            "rss", "RSS").replace("finance", "Yahoo Finance").replace("news", "NewsAPI")
+        for tk in tickers_in_text(s.title or ""):
+            if tk not in selected:
+                continue
+            bucket = out.setdefault(tk, [])
+            if len(bucket) < limit_per:
+                bucket.append((s.title, s.sentiment or 0.0, src))
+    return out
 
 
 # ── Sidebar: brand + asset filter ─────────────────────────────────────────────
@@ -265,26 +284,47 @@ def page_predictions():
         st.plotly_chart(sfig(fig, 460), use_container_width=True)
     with colR:
         st.markdown("#### Signals & why")
-        drivers = lab.get("drivers", {})
+        reasons = lab.get("reasons", {})
+        heads_by_tk = _headlines_by_ticker(tuple(sorted(SELECTED)), _data_version())
+        snap = lab["snapshot"]
         for _, r in live.iterrows():
+            tk = r["ticker"]
             pill = r["Signal"].lower()
-            # top drivers for this asset (sign-aware colouring)
-            drv = drivers.get(r["ticker"], [])[:3]
-            drv_html = ""
-            for label, c in drv:
-                clr = GOOD if c > 0 else BAD
-                arrow = "▲" if c > 0 else "▼"
-                drv_html += (f"<div style='font-size:0.78rem;color:{INK2}'>"
-                             f"<span style='color:{clr}'>{arrow}</span> {label}</div>")
+            reason_html = "".join(
+                f"<div style='font-size:0.8rem;color:{INK2};margin-top:2px'>• {e['phrase']}</div>"
+                for e in reasons.get(tk, [])[:3])
             st.markdown(
-                f"<div class='card' style='padding:10px 14px;margin-bottom:8px'>"
+                f"<div class='card' style='padding:11px 14px;margin-bottom:6px'>"
                 f"<span style='font-weight:700'>{r['name']}</span> "
-                f"<span class='pill {pill}'>{r['Signal']}</span><br>"
-                f"<span style='color:{INK2};font-size:0.84rem'>"
-                f"predicted <b>{r['pred_return']:+.2f}%</b> · "
-                f"sentiment {r['avg_sentiment']:+.2f}</span>"
-                f"<div style='margin-top:6px'>{drv_html}</div></div>",
-                unsafe_allow_html=True)
+                f"<span class='pill {pill}'>{r['Signal']}</span> "
+                f"<span style='color:{INK2};font-size:0.82rem'>&nbsp;{r['pred_return']:+.2f}%</span>"
+                f"<div style='font-size:0.82rem;margin-top:4px'>{r['rationale']}</div>"
+                f"{reason_html}</div>", unsafe_allow_html=True)
+            with st.expander(f"Evidence & sources · {r['name']}"):
+                srow = snap[snap["ticker"] == tk]
+                if not srow.empty:
+                    s = srow.iloc[0]
+                    st.markdown(
+                        f"<div class='note' style='margin:2px 0'>"
+                        f"<b>The numbers behind it</b> — sentiment {s['avg_sentiment']:+.2f}, "
+                        f"{int(s['bull_count'])} bullish / {int(s['bear_count'])} bearish "
+                        f"headlines today, 5-day price {s['ret_5d']:+.1f}%, "
+                        f"buzz {int(s['buzz'])} stories.</div>", unsafe_allow_html=True)
+                hs = heads_by_tk.get(tk, [])
+                if hs:
+                    st.markdown("<div class='note' style='margin:2px 0'><b>Recent headlines "
+                                "(scored)</b></div>", unsafe_allow_html=True)
+                    for title, sent, src in hs[:5]:
+                        clr = GOOD if sent > 0.05 else (BAD if sent < -0.05 else MUTED)
+                        st.markdown(
+                            f"<div class='note' style='margin:1px 0'>"
+                            f"<b style='color:{clr}'>{sent:+.2f}</b> {title} "
+                            f"<span style='color:{MUTED}'>· {src}</span></div>",
+                            unsafe_allow_html=True)
+                else:
+                    st.caption("No recent headlines matched this asset.")
+                st.caption("Sources: per-ticker news + Reddit/RSS (sentiment via VADER); "
+                           "prices via Yahoo Finance daily bars.")
 
     st.markdown(f"<div class='note'>⚠️ Not financial advice. On a noisy real-world "
                 "signal these models run near ~55% directional accuracy — treat any single "
@@ -396,21 +436,44 @@ def page_howitworks():
 
     drv = lab.get("drivers", {}).get(ticker, [])
     if drv:
-        st.markdown("<div class='note'>What pushed the number (linear model's "
-                    "contribution per feature, in return-% points):</div>",
+        st.markdown("<div class='note'>What the model weighted (each feature's "
+                    "contribution to the number, in return-% points):</div>",
                     unsafe_allow_html=True)
-        dd = pd.DataFrame(drv, columns=["Feature", "contrib"])
+        dd = pd.DataFrame([{"Feature": d["label"], "contrib": d["contrib"]} for d in drv])
         fig = go.Figure(go.Bar(
             x=dd["contrib"], y=dd["Feature"], orientation="h",
             marker_color=[GOOD if c > 0 else BAD for c in dd["contrib"]],
             text=[f"{c:+.2f}" for c in dd["contrib"]], textposition="outside"))
         fig.add_vline(x=0, line_color=MUTED)
+        lo, hi = float(dd["contrib"].min()), float(dd["contrib"].max())
+        pad = max(0.2, (hi - lo) * 0.25)
         fig.update_layout(title="Top drivers of this prediction",
-                          yaxis=dict(autorange="reversed"), xaxis_title="Contribution (% pts)")
+                          yaxis=dict(autorange="reversed"), xaxis_title="Contribution (% pts)",
+                          xaxis=dict(range=[lo - pad, hi + pad]))
         st.plotly_chart(sfig(fig, 260), use_container_width=True)
 
-    # ── Step 4: the pipeline in one line ──────────────────────────────────────
-    st.markdown("### 4 · The whole pipeline")
+    # ── Step 4: where the data comes from ─────────────────────────────────────
+    st.markdown("### 4 · Where the data comes from")
+    n_stories = session.query(Story).count()
+    n_prices = session.query(MarketData).count()
+    dmin = session.query(func.min(MarketData.date)).scalar()
+    dmax = session.query(func.max(MarketData.date)).scalar()
+    span = f"{dmin:%Y-%m-%d} → {dmax:%Y-%m-%d}" if dmin and dmax else "—"
+    prov = pd.DataFrame([
+        {"Data": "Headlines", "Source": "yfinance per-ticker news + Reddit + RSS",
+         "How": "fetched by the collector, deduped by URL", "Count": f"{n_stories:,}"},
+        {"Data": "Sentiment", "Source": "VADER + finance word-list",
+         "How": "each headline scored −1…+1 on ingest", "Count": "per headline"},
+        {"Data": "Prices", "Source": "Yahoo Finance (yfinance)",
+         "How": "daily OHLCV bars per ticker", "Count": f"{n_prices:,}"},
+        {"Data": "Features", "Source": "engineered in market_features.py",
+         "How": "sentiment + buzz + price + market context per (asset, day)", "Count": "16"},
+    ])
+    st.dataframe(prov, use_container_width=True, hide_index=True)
+    st.caption(f"Date range in the database: {span}. "
+               "In this demo the data is synthetic; run `test_hn_api.py` locally for the real feeds.")
+
+    st.markdown("### 5 · The whole pipeline")
     st.markdown(
         f"<div class='note'>Headlines → <b>sentiment score</b> → daily <b>feature "
         f"vector</b> (sentiment + buzz + price momentum + market context) → "

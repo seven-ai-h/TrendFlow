@@ -19,9 +19,12 @@ from config import TICKER_KEYWORDS as TICKER_MAP, TICKER_NAMES  # single source 
 FEATURE_COLS = [
     'buzz', 'buzz_velocity', 'avg_sentiment', 'sentiment_std', 'bullish_ratio',
     'weighted_sentiment', 'sentiment_momentum', 'sentiment_volatility',
-    'cross_sec_rank', 'prev_return', 'momentum_3d', 'volume_ratio',
+    'cross_sec_rank', 'prev_return', 'momentum_3d', 'ret_5d', 'volume_ratio',
     'volatility_3d', 'market_return', 'day_of_week',
 ]
+
+# Non-feature display fields carried through for reasons/evidence in the UI
+DISPLAY_COLS = ['bull_count', 'bear_count']
 
 # Human-readable labels for the dashboard's "why" / how-it-works views
 FEATURE_LABELS = {
@@ -36,6 +39,7 @@ FEATURE_LABELS = {
     'cross_sec_rank': 'sentiment rank vs other assets',
     'prev_return': 'yesterday’s return',
     'momentum_3d': '3-day price momentum',
+    'ret_5d': '5-day price return',
     'volume_ratio': 'volume vs 5-day avg',
     'volatility_3d': '3-day volatility',
     'market_return': 'whole-market move today',
@@ -79,6 +83,8 @@ def _daily_social(session, days_back: int) -> pd.DataFrame:
         avg_sentiment=('sentiment', 'mean'),
         sentiment_std=('sentiment', 'std'),
         bullish_ratio=('sentiment', lambda x: (x > 0.15).mean()),
+        bull_count=('sentiment', lambda x: int((x > 0.15).sum())),
+        bear_count=('sentiment', lambda x: int((x < -0.15).sum())),
         weighted_sentiment=('sentiment', 'mean'),  # refined below with score weights
         total_score=('score', 'sum'),
     ).reset_index()
@@ -135,6 +141,7 @@ def build_market_dataset(session, days_back: int = 60) -> pd.DataFrame:
         if len(pgrp) < 6:
             continue
         pgrp['momentum_3d'] = pgrp['close'].pct_change(3).fillna(0) * 100
+        pgrp['ret_5d'] = pgrp['close'].pct_change(5).fillna(0) * 100
         pgrp['volatility_3d'] = pgrp['return_pct'].rolling(3, min_periods=1).std().fillna(0)
         vol_ma = pgrp['volume'].rolling(5, min_periods=1).mean()
         pgrp['volume_ratio'] = (pgrp['volume'] / vol_ma).fillna(1.0)
@@ -167,10 +174,13 @@ def build_market_dataset(session, days_back: int = 60) -> pd.DataFrame:
                 s_mom = float(sent_mom.loc[d]) if d in sent_mom.index else 0.0
                 s_vol = float(sent_vol.loc[d]) if d in sent_vol.index else 0.0
                 x_rank = float(rank_lookup.get((ticker, d), 0.5))
+                bull_ct = int(srow['bull_count'])
+                bear_ct = int(srow['bear_count'])
             else:
                 buzz = buzz_vel = avg_sent = sent_std = bull = wsent = 0.0
                 s_mom = s_vol = 0.0
                 x_rank = 0.5  # neutral rank when no coverage
+                bull_ct = bear_ct = 0
 
             samples.append({
                 'ticker': ticker,
@@ -186,10 +196,13 @@ def build_market_dataset(session, days_back: int = 60) -> pd.DataFrame:
                 'cross_sec_rank': x_rank,
                 'prev_return': prow['prev_return'],
                 'momentum_3d': prow['momentum_3d'],
+                'ret_5d': prow['ret_5d'],
                 'volume_ratio': prow['volume_ratio'],
                 'volatility_3d': prow['volatility_3d'],
                 'market_return': float(market_ret.get(d, 0.0)),
                 'day_of_week': pd.Timestamp(d).dayofweek,
+                'bull_count': bull_ct,
+                'bear_count': bear_ct,
                 'next_return': prow['next_return'],
                 'will_rise': 1 if prow['next_return'] > 0 else 0,
             })

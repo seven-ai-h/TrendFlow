@@ -24,7 +24,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from analysis.market_features import build_market_dataset, FEATURE_COLS, TICKER_NAMES
+from analysis.market_features import build_market_dataset, FEATURE_COLS, TICKER_NAMES, FEATURE_LABELS
 
 warnings.filterwarnings("ignore")
 
@@ -221,7 +221,7 @@ def train_all_models(session, days_back: int = 60) -> dict:
     # feature importance from RF (single, clear chart)
     importance = dict(zip(FEATURE_COLS, rf.feature_importances_))
 
-    live, drivers, snapshot = _live_predictions(
+    live, drivers, reasons, snapshot = _live_predictions(
         session, {"Linear Regression": lr, "Random Forest": rf}, scaler, days_back)
     backtest = compute_backtest_stats(test_records, model_names)
 
@@ -241,6 +241,7 @@ def train_all_models(session, days_back: int = 60) -> dict:
         "feature_cols": FEATURE_COLS,
         "live": live,
         "drivers": drivers,
+        "reasons": reasons,
         "snapshot": snapshot,
     }
 
@@ -336,6 +337,75 @@ def compute_strategy(records, model_names):
     return dates, strategy, buyhold
 
 
+def _feature_phrase(feature: str, value: float) -> str:
+    """Turn a raw feature value into a concrete, human phrase with its number."""
+    if feature in ("avg_sentiment", "weighted_sentiment"):
+        tone = "bullish" if value > 0.15 else ("bearish" if value < -0.15 else "neutral")
+        return f"{tone} headline sentiment ({value:+.2f})"
+    if feature == "sentiment_momentum":
+        d = "rising" if value > 0.02 else ("falling" if value < -0.02 else "flat")
+        return f"sentiment {d} ({value:+.2f})"
+    if feature == "cross_sec_rank":
+        return f"ranks in the top {max(1, round((1 - value) * 100))}% for sentiment today"
+    if feature in ("momentum_3d", "ret_5d", "prev_return", "market_return"):
+        d = "up" if value > 0 else "down"
+        span = {"momentum_3d": "3-day", "ret_5d": "5-day",
+                "prev_return": "yesterday", "market_return": "market today"}[feature]
+        return f"{span} price {d} {abs(value):.1f}%"
+    if feature == "buzz":
+        return f"{int(value)} headlines today"
+    if feature == "buzz_velocity":
+        d = "spiking" if value > 1.3 else ("quiet" if value < 0.7 else "steady")
+        return f"news volume {d} ({value:.1f}× normal)"
+    if feature == "volume_ratio":
+        return f"trading volume {value:.1f}× its 5-day average"
+    if feature == "volatility_3d":
+        return f"3-day volatility {value:.1f}%"
+    if feature == "bullish_ratio":
+        return f"{round(value * 100)}% of headlines bullish"
+    return f"{FEATURE_LABELS.get(feature, feature)} {value:+.2f}"
+
+
+def _directional_evidence(frow) -> list:
+    """Score each signal by how BULLISH its value is (positive) or bearish
+    (negative), so the reasons shown to a human are intuitive, not the model's
+    raw (sometimes counter-intuitive) coefficients."""
+    ev = []
+
+    def add(feature, bullishness):
+        ev.append({"feature": feature, "bull": float(bullishness),
+                   "phrase": _feature_phrase(feature, float(frow[feature]))})
+
+    add("avg_sentiment", frow["avg_sentiment"])
+    add("sentiment_momentum", frow["sentiment_momentum"] * 2)
+    add("ret_5d", frow["ret_5d"] / 5.0)
+    add("momentum_3d", frow["momentum_3d"] / 3.0)
+    add("cross_sec_rank", (frow["cross_sec_rank"] - 0.5) * 2)
+    add("bullish_ratio", (frow["bullish_ratio"] - 0.5) * 2)
+    add("market_return", frow["market_return"])
+    return sorted(ev, key=lambda e: abs(e["bull"]), reverse=True)
+
+
+def _reasons_for(signal: str, evidence: list, n: int = 3) -> list:
+    if signal == "BUY":
+        picks = [e for e in evidence if e["bull"] > 0.03]
+    elif signal == "SELL":
+        picks = [e for e in evidence if e["bull"] < -0.03]
+    else:
+        picks = evidence
+    return (picks or evidence)[:n]
+
+
+def _build_rationale(signal: str, reasons: list) -> str:
+    """Plain-English reason from the top aligned evidence."""
+    if not reasons:
+        return f"{signal} — no strong signal in the data."
+    txt = " and ".join(r["phrase"] for r in reasons[:2])
+    verb = {"BUY": "Buy signal", "SELL": "Sell signal",
+            "HOLD": "Sitting out"}[signal]
+    return f"{verb}: {txt}."
+
+
 def _live_predictions(session, tab_models, scaler, days_back):
     """Return (predictions_df, drivers_dict, snapshot_df).
 
@@ -343,7 +413,6 @@ def _live_predictions(session, tab_models, scaler, days_back):
     the linear model's additive contribution to the predicted return, so every
     call has a transparent 'why'. snapshot_df carries the raw feature values.
     """
-    from analysis.market_features import FEATURE_LABELS
     ds = build_market_dataset(session, days_back=days_back)
     if ds.empty:
         return pd.DataFrame(), {}, pd.DataFrame()
@@ -355,11 +424,21 @@ def _live_predictions(session, tab_models, scaler, days_back):
     pred = (rf.predict(Xs) + lr.predict(Xs)) / 2  # ensemble of the two tabular models
 
     # Per-asset drivers via the linear model: contribution_i = coef_i * scaled_x_i
+    # (faithful model attribution — used for the 'what the model weighted' chart)
     contribs = Xs * lr.coef_  # shape (n_assets, n_features)
-    drivers = {}
+    drivers, reasons, rationales = {}, {}, {}
     for i, tk in enumerate(latest["ticker"]):
+        frow = latest.iloc[i]
         pairs = sorted(zip(FEATURE_COLS, contribs[i]), key=lambda p: abs(p[1]), reverse=True)
-        drivers[tk] = [(FEATURE_LABELS.get(f, f), float(c)) for f, c in pairs[:4]]
+        drivers[tk] = [{
+            "feature": f, "label": FEATURE_LABELS.get(f, f), "contrib": float(c),
+            "value": float(frow[f]), "phrase": _feature_phrase(f, float(frow[f])),
+        } for f, c in pairs[:5]]
+
+        signal = "BUY" if pred[i] > 0.15 else ("SELL" if pred[i] < -0.15 else "HOLD")
+        ev = _directional_evidence(frow)
+        reasons[tk] = _reasons_for(signal, ev)
+        rationales[tk] = _build_rationale(signal, reasons[tk])
 
     out = pd.DataFrame({
         "ticker": latest["ticker"],
@@ -369,8 +448,9 @@ def _live_predictions(session, tab_models, scaler, days_back):
     })
     out["Signal"] = out["pred_return"].apply(
         lambda v: "BUY" if v > 0.15 else ("SELL" if v < -0.15 else "HOLD"))
+    out["rationale"] = out["ticker"].map(rationales)
     out = out.sort_values("pred_return", ascending=False).reset_index(drop=True)
-    return out, drivers, latest
+    return out, drivers, reasons, latest
 
 
 if __name__ == "__main__":
