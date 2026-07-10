@@ -20,11 +20,11 @@ from config import TICKER_NAMES
 
 LOOKBACK = 120  # days of history the models train on
 
-st.set_page_config(page_title="TrendFlow", page_icon="📈", layout="wide",
+st.set_page_config(page_title="AlphaSignal", layout="wide",
                    initial_sidebar_state="expanded")
 
 if not os.path.exists("trendflow.db"):
-    st.warning("⚠️ No database found. Run `python seed_data.py` (demo) or "
+    st.warning("No database found. Run `python seed_data.py` (demo) or "
                "`python test_hn_api.py` (live) first.")
     st.stop()
 
@@ -101,8 +101,8 @@ def _headlines_by_ticker(selected, _ver, limit_per=6):
 # ── Sidebar: brand + asset filter ─────────────────────────────────────────────
 _all_names = [TICKER_NAMES[t] for t in TICKER_NAMES]
 with st.sidebar:
-    st.markdown("### 📈 TrendFlow")
-    st.caption("Sentiment → next-day returns")
+    st.markdown("### AlphaSignal")
+    st.caption("Sentiment-driven next-day return signals")
     st.divider()
     st.markdown("**Assets**")
     picked_names = st.multiselect("Filter assets", _all_names, default=_all_names,
@@ -120,14 +120,14 @@ SELECTED = {_name_to_ticker[n] for n in picked_names if n in _name_to_ticker}
 
 def _need_assets():
     if not SELECTED:
-        st.info("👈 Select at least one asset in the sidebar.")
+        st.info("Select at least one asset in the sidebar.")
         return True
     return False
 
 
 # ══════════════════════════════ PAGE 1 · MODELS ══════════════════════════════
 def page_models():
-    st.title("🧪 Model Lab")
+    st.title("Model Lab")
     st.markdown("<div class='lede'>Three models predict each asset's "
                 "<b>next-day return</b> — a Linear baseline, a Random Forest, and an "
                 "LSTM neural network — tested on a held-out future period.</div>",
@@ -135,12 +135,12 @@ def page_models():
 
     lab = get_lab()
     if not lab["ok"]:
-        st.warning(f"⚠️ {lab['error']}")
+        st.warning(f"{lab['error']}")
         return
     if _need_assets():
         return
     if not lab["torch_ok"]:
-        st.info("ℹ️ PyTorch not available — LSTM skipped. `pip install torch` to enable it.")
+        st.info("PyTorch not available — LSTM skipped. `pip install torch` to enable it.")
 
     # Re-aggregate everything for the selected assets (no retraining)
     names = lab["model_names"]
@@ -158,11 +158,11 @@ def page_models():
     lb = pd.DataFrame(leaderboard)
     winner = lb.iloc[0]
     if not all_selected:
-        st.caption(f"📊 Metrics & charts reflect the {len(SELECTED)} selected asset(s). "
+        st.caption(f"Metrics & charts reflect the {len(SELECTED)} selected asset(s). "
                    "Select all to see the full-universe results.")
 
     # Leaderboard
-    st.subheader("🏆 Leaderboard")
+    st.subheader("Leaderboard")
     disp = lb.copy()
     disp["Dir. Acc"] = (disp["Dir. Acc"] * 100).map("{:.1f}%".format)
     for col in ["MAE", "RMSE", "R2", "d-prime"]:
@@ -170,7 +170,7 @@ def page_models():
     st.dataframe(disp, use_container_width=True, hide_index=True)
     wexp = MODEL_EXPLAINERS.get(winner["Model"], {})
     st.markdown(
-        f"<div class='note'>🥇 <b>{winner['Model']}</b> leads — "
+        f"<div class='note'><b>{winner['Model']}</b> leads — "
         f"<b>{winner['Dir. Acc']*100:.1f}%</b> directional accuracy, d′ "
         f"<b>{winner['d-prime']:.2f}</b>. {wexp.get('read','')}<br>"
         "<b>Reading it:</b> MAE/RMSE = avg error size (lower better) · "
@@ -179,7 +179,7 @@ def page_models():
         unsafe_allow_html=True)
 
     # Strategy Index — headline
-    st.subheader("💰 Would it have made money?")
+    st.subheader("Would it have made money?")
     st.markdown("<div class='note'>Grow <b>$100</b> over the test period by holding an "
                 "asset only when the model predicts a rise, vs. simply buying &amp; "
                 "holding everything (dashed). Above the dashed line = beat the market."
@@ -209,11 +209,11 @@ def page_models():
             "drawdown = worst peak-to-trough dip · Win rate = share of green days. "
             "<b>Caveat:</b> these are computed on a short, clean <i>synthetic</i> window "
             "and are flattering — real strategies land at Sharpe ~0.5–2. The point is "
-            "TrendFlow computes the right risk-adjusted metrics, not that this is "
+            "AlphaSignal computes the right risk-adjusted metrics, not that this is "
             "a money-printer.</div>", unsafe_allow_html=True)
 
     # Predicted vs actual
-    st.subheader("🎯 Predicted vs. actual return")
+    st.subheader("Predicted vs. actual return")
     st.markdown("<div class='note'>Each dot is one test day. The tighter the cloud hugs "
                 "the diagonal, the better the prediction.</div>", unsafe_allow_html=True)
     cols = st.columns(len(pred_vs_actual))
@@ -232,7 +232,7 @@ def page_models():
             st.plotly_chart(sfig(f, 280), use_container_width=True)
 
     # Model cards
-    st.subheader("📖 The three models")
+    st.subheader("The three models")
     cols = st.columns(3)
     for col, name in zip(cols, ["Linear Regression", "Random Forest", "LSTM"]):
         info = MODEL_EXPLAINERS[name]
@@ -246,14 +246,14 @@ def page_models():
 
 # ══════════════════════════ PAGE 2 · PREDICTIONS ═════════════════════════════
 def page_predictions():
-    st.title("📡 Predictions")
+    st.title("Predictions")
     st.markdown("<div class='lede'>What the models say to do with each asset "
                 "<b>right now</b> — the predicted next-day return drives a "
                 "<b>BUY / HOLD / SELL</b> call.</div>", unsafe_allow_html=True)
 
     lab = get_lab()
     if not lab["ok"]:
-        st.warning(f"⚠️ {lab['error']}")
+        st.warning(f"{lab['error']}")
         return
     if _need_assets():
         return
@@ -263,9 +263,9 @@ def page_predictions():
         return
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("🟢 BUY", int((live["Signal"] == "BUY").sum()))
-    c2.metric("⚪ HOLD", int((live["Signal"] == "HOLD").sum()))
-    c3.metric("🔴 SELL", int((live["Signal"] == "SELL").sum()))
+    c1.metric("BUY", int((live["Signal"] == "BUY").sum()))
+    c2.metric("HOLD", int((live["Signal"] == "HOLD").sum()))
+    c3.metric("SELL", int((live["Signal"] == "SELL").sum()))
 
     colL, colR = st.columns([3, 2], gap="large")
     with colL:
@@ -326,7 +326,7 @@ def page_predictions():
                 st.caption("Sources: per-ticker news + Reddit/RSS (sentiment via VADER); "
                            "prices via Yahoo Finance daily bars.")
 
-    st.markdown(f"<div class='note'>⚠️ Not financial advice. On a noisy real-world "
+    st.markdown(f"<div class='note'>Not financial advice. On a noisy real-world "
                 "signal these models run near ~55% directional accuracy — treat any single "
                 "call as a weak prior, not a guarantee.</div>", unsafe_allow_html=True)
 
@@ -334,7 +334,7 @@ def page_predictions():
 # ═══════════════════════════ PAGE 3 · SENTIMENT ══════════════════════════════
 def page_sentiment():
     from analysis.market_features import tickers_in_text, TICKER_NAMES
-    st.title("💬 Sentiment")
+    st.title("Sentiment")
     st.markdown("<div class='lede'>The input signal: every headline scored from "
                 "<b>−1 bearish</b> to <b>+1 bullish</b> (VADER + a finance word-list).</div>",
                 unsafe_allow_html=True)
@@ -361,13 +361,13 @@ def page_sentiment():
     uniq = sdf.drop_duplicates("title")
     c1, c2 = st.columns(2, gap="large")
     with c1:
-        st.markdown("#### 🟢 Most bullish")
+        st.markdown("#### Most bullish")
         for _, r in uniq.nlargest(7, "sentiment").iterrows():
             st.markdown(f"<div class='note' style='margin:4px 0'>"
                         f"<b style='color:{GOOD}'>+{r['sentiment']:.2f}</b> &nbsp;{r['title']}</div>",
                         unsafe_allow_html=True)
     with c2:
-        st.markdown("#### 🔴 Most bearish")
+        st.markdown("#### Most bearish")
         for _, r in uniq.nsmallest(7, "sentiment").iterrows():
             st.markdown(f"<div class='note' style='margin:4px 0'>"
                         f"<b style='color:{BAD}'>{r['sentiment']:.2f}</b> &nbsp;{r['title']}</div>",
@@ -377,19 +377,19 @@ def page_sentiment():
 # ═══════════════════════════ PAGE 4 · HOW IT WORKS ═══════════════════════════
 def page_howitworks():
     from analysis.market_features import tickers_in_text, FEATURE_LABELS
-    st.title("🔍 How it works")
+    st.title("How it works")
     st.markdown("<div class='lede'>Follow one real prediction from raw headlines all the "
                 "way to a number — no black box.</div>", unsafe_allow_html=True)
 
     lab = get_lab()
     if not lab["ok"]:
-        st.warning(f"⚠️ {lab['error']}")
+        st.warning(f"{lab['error']}")
         return
 
     live = lab["live"]
     live = live[live["ticker"].isin(SELECTED)] if SELECTED else live
     if live.empty:
-        st.info("👈 Select at least one asset in the sidebar.")
+        st.info("Select at least one asset in the sidebar.")
         return
 
     name = st.selectbox("Pick an asset to trace", live["name"].tolist())
@@ -484,9 +484,9 @@ def page_howitworks():
 
 # ── Native sidebar navigation ─────────────────────────────────────────────────
 nav = st.navigation([
-    st.Page(page_models, title="Models", icon="🧪", default=True),
-    st.Page(page_predictions, title="Predictions", icon="📡"),
-    st.Page(page_sentiment, title="Sentiment", icon="💬"),
-    st.Page(page_howitworks, title="How it works", icon="🔍"),
+    st.Page(page_models, title="Models", default=True),
+    st.Page(page_predictions, title="Predictions"),
+    st.Page(page_sentiment, title="Sentiment"),
+    st.Page(page_howitworks, title="How it works"),
 ])
 nav.run()
