@@ -51,11 +51,14 @@ NEUTRAL = [
 
 def _display_keyword(ticker: str, name: str) -> str:
     """Pick a natural filler keyword for headline templates from the config
-    keywords — the first one that isn't just the company name, else 'tech'."""
+    keywords — skip the company name and the bare ticker symbol so headlines
+    read like 'strong AWS demand' rather than 'strong amzn demand'."""
     name_low = name.lower()
+    symbol = ticker.split("-")[0].lower()  # 'BTC-USD' -> 'btc'
     for kw in TICKER_KEYWORDS.get(ticker, []):
-        if kw not in name_low and name_low not in kw and len(kw) > 2:
-            return kw
+        if kw in name_low or name_low in kw or kw == symbol or len(kw) <= 2:
+            continue
+        return kw
     return "tech"
 
 

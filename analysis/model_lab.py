@@ -130,14 +130,14 @@ def _train_lstm(X_seq_tr, y_tr, X_seq_te, input_size):
 
     model = LSTMReg(input_size)
     opt = torch.optim.Adam(model.parameters(), lr=0.008, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.StepLR(opt, step_size=150, gamma=0.5)
+    sched = torch.optim.lr_scheduler.StepLR(opt, step_size=80, gamma=0.5)
     lossf = nn.SmoothL1Loss()  # robust to outlier returns
 
     Xtr = torch.tensor(X_seq_tr, dtype=torch.float32)
     ytr = torch.tensor(y_tr_n, dtype=torch.float32)
 
     model.train()
-    for _ in range(400):
+    for _ in range(200):
         opt.zero_grad()
         loss = lossf(model(Xtr), ytr)
         loss.backward()

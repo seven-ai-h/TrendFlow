@@ -1,12 +1,11 @@
 [theme]
-# Dark, high-contrast theme — matches the transparent Plotly backgrounds and
-# fixes the previous dark-on-dark metric cards. Palette from the validated
-# data-viz reference (dark surface #1a1a19, page plane #0d0d0d).
-base = "dark"
-primaryColor = "#3987e5"
-backgroundColor = "#0d0d0d"
-secondaryBackgroundColor = "#1a1a19"
-textColor = "#ffffff"
+# Light, minimal theme — validated data-viz light palette.
+# Clean white surfaces, one blue accent, restrained ink.
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#f9f9f7"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#0b0b0b"
 font = "sans serif"
 
 [server]
