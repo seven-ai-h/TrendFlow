@@ -189,9 +189,8 @@ def train_all_models(session, days_back: int = 60) -> dict:
     if torch_ok:
         preds["LSTM"] = lstm_pred
 
-    # ── Metrics + per-model test predictions ──────────────────────────────────
-    leaderboard, pred_vs_actual, strategy = [], {}, {}
-    strat_dates = None
+    # ── Metrics (global — computed on the full test set) ──────────────────────
+    leaderboard = []
     for name, yp in preds.items():
         leaderboard.append({
             "Model": name,
@@ -201,20 +200,18 @@ def train_all_models(session, days_back: int = 60) -> dict:
             "Dir. Acc": _directional_accuracy(y_te, yp),
             "d-prime": _d_prime(y_te, yp),
         })
-        pred_vs_actual[name] = {"actual": y_te.tolist(), "pred": np.asarray(yp).tolist()}
 
-        # strategy: long-or-flat by predicted sign, averaged across tickers per date
-        dfp = pd.DataFrame({"date": dates_te, "ticker": tickers_te,
-                            "actual": y_te, "pred": yp})
-        dfp["strat_ret"] = np.where(dfp["pred"] > 0, dfp["actual"], 0.0)
-        daily = dfp.groupby("date").agg(strat=("strat_ret", "mean"),
-                                        bh=("actual", "mean")).reset_index()
-        daily = daily.sort_values("date")
-        idx = 100 * np.cumprod(1 + daily["strat"].values / 100)
-        strategy[name] = idx.tolist()
-        if strat_dates is None:
-            strat_dates = pd.to_datetime(daily["date"]).dt.strftime("%Y-%m-%d").tolist()
-            buyhold = 100 * np.cumprod(1 + daily["bh"].values / 100)
+    # ── Per-ticker test records (so the dashboard can filter by asset) ────────
+    model_names = list(preds.keys())
+    test_df = pd.DataFrame({"date": pd.to_datetime(dates_te), "ticker": tickers_te,
+                            "actual": y_te})
+    for name, yp in preds.items():
+        test_df[f"pred::{name}"] = np.asarray(yp)
+    test_records = test_df.assign(
+        date=test_df["date"].dt.strftime("%Y-%m-%d")).to_dict("records")
+
+    pred_vs_actual = compute_pred_vs_actual(test_records, model_names)
+    strat_dates, strategy, buyhold = compute_strategy(test_records, model_names)
 
     # rank by directional accuracy then d-prime (what a trader cares about)
     leaderboard.sort(key=lambda r: (r["Dir. Acc"],
@@ -233,13 +230,77 @@ def train_all_models(session, days_back: int = 60) -> dict:
         "n_tickers": len(set(tickers)),
         "torch_ok": torch_ok,
         "leaderboard": leaderboard,
+        "model_names": model_names,
         "pred_vs_actual": pred_vs_actual,
         "strategy": strategy, "strategy_dates": strat_dates,
         "buyhold": list(buyhold),
+        "test_records": test_records,
         "importance": importance,
         "feature_cols": FEATURE_COLS,
         "live": live,
     }
+
+
+# ── Re-aggregation helpers (used for the whole set AND asset-filtered subsets) ─
+def compute_pred_vs_actual(records, model_names) -> dict:
+    df = pd.DataFrame(records)
+    out = {}
+    if df.empty:
+        return out
+    for name in model_names:
+        col = f"pred::{name}"
+        if col in df.columns:
+            out[name] = {"actual": df["actual"].tolist(), "pred": df[col].tolist()}
+    return out
+
+
+def compute_leaderboard(records, model_names) -> list:
+    """Recompute the metrics table from a (possibly asset-filtered) record set."""
+    df = pd.DataFrame(records)
+    board = []
+    if df.empty:
+        return board
+    y = df["actual"].values
+    for name in model_names:
+        col = f"pred::{name}"
+        if col not in df.columns:
+            continue
+        yp = df[col].values
+        board.append({
+            "Model": name,
+            "MAE": mean_absolute_error(y, yp),
+            "RMSE": float(np.sqrt(mean_squared_error(y, yp))),
+            "R2": r2_score(y, yp) if len(y) > 2 else float("nan"),
+            "Dir. Acc": _directional_accuracy(y, yp),
+            "d-prime": _d_prime(y, yp),
+        })
+    board.sort(key=lambda r: (r["Dir. Acc"],
+                              r["d-prime"] if r["d-prime"] == r["d-prime"] else -9),
+               reverse=True)
+    return board
+
+
+def compute_strategy(records, model_names):
+    """Long-or-flat by predicted sign, averaged across tickers per day, indexed
+    to 100. Works on the full test set or any asset-filtered subset."""
+    df = pd.DataFrame(records)
+    if df.empty:
+        return [], {}, []
+    df = df.sort_values("date")
+    strategy, dates, buyhold = {}, None, None
+    for name in model_names:
+        col = f"pred::{name}"
+        if col not in df.columns:
+            continue
+        d = df[["date", "actual", col]].copy()
+        d["sret"] = np.where(d[col] > 0, d["actual"], 0.0)
+        daily = d.groupby("date").agg(s=("sret", "mean"),
+                                      b=("actual", "mean")).reset_index().sort_values("date")
+        strategy[name] = (100 * np.cumprod(1 + daily["s"].values / 100)).tolist()
+        if dates is None:
+            dates = daily["date"].tolist()
+            buyhold = (100 * np.cumprod(1 + daily["b"].values / 100)).tolist()
+    return dates, strategy, buyhold
 
 
 def _live_predictions(session, tab_models, scaler, days_back) -> pd.DataFrame:

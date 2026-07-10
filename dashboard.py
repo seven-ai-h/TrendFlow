@@ -11,7 +11,13 @@ import plotly.graph_objects as go
 
 from database.db_setup import getSession
 from database.models import Story, MarketData
-from analysis.model_lab import train_all_models, MODEL_EXPLAINERS
+from analysis.model_lab import (
+    train_all_models, MODEL_EXPLAINERS,
+    compute_leaderboard, compute_strategy, compute_pred_vs_actual,
+)
+from config import TICKER_NAMES
+
+LOOKBACK = 120  # days of history the models train on
 
 st.set_page_config(page_title="TrendFlow", page_icon="📈", layout="wide",
                    initial_sidebar_state="expanded")
@@ -59,19 +65,6 @@ def sfig(fig, height=None):
 
 session = getSession()
 
-# ── Sidebar controls (below the auto nav) ─────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 📈 TrendFlow")
-    st.caption("Sentiment → next-day returns")
-    st.divider()
-    lookback = st.slider("History used (days)", 40, 130, 120, 10)
-    if st.button("🔄 Retrain models", use_container_width=True):
-        st.cache_resource.clear()
-        st.rerun()
-    st.caption("Demo data is synthetic (this box blocks live APIs). Run "
-               "`test_hn_api.py` locally for real headlines + prices.")
-
-
 @st.cache_resource(show_spinner="Training Linear Regression, Random Forest and the LSTM…")
 def _train_cached(lookback_days, data_version):
     return train_all_models(session, days_back=lookback_days)
@@ -83,7 +76,34 @@ def _data_version():
 
 
 def get_lab():
-    return _train_cached(lookback, _data_version())
+    return _train_cached(LOOKBACK, _data_version())
+
+
+# ── Sidebar: brand + asset filter ─────────────────────────────────────────────
+_all_names = [TICKER_NAMES[t] for t in TICKER_NAMES]
+with st.sidebar:
+    st.markdown("### 📈 TrendFlow")
+    st.caption("Sentiment → next-day returns")
+    st.divider()
+    st.markdown("**Assets**")
+    picked_names = st.multiselect("Filter assets", _all_names, default=_all_names,
+                                  label_visibility="collapsed",
+                                  placeholder="Choose assets…")
+    st.caption(f"{len(picked_names)} of {len(_all_names)} assets shown.")
+    st.divider()
+    st.caption("Demo data is synthetic (this box blocks live APIs). Run "
+               "`test_hn_api.py` locally for real headlines + prices.")
+
+# name -> ticker, and the set of selected tickers used across pages
+_name_to_ticker = {v: k for k, v in TICKER_NAMES.items()}
+SELECTED = {_name_to_ticker[n] for n in picked_names if n in _name_to_ticker}
+
+
+def _need_assets():
+    if not SELECTED:
+        st.info("👈 Select at least one asset in the sidebar.")
+        return True
+    return False
 
 
 # ══════════════════════════════ PAGE 1 · MODELS ══════════════════════════════
@@ -98,16 +118,29 @@ def page_models():
     if not lab["ok"]:
         st.warning(f"⚠️ {lab['error']}")
         return
+    if _need_assets():
+        return
     if not lab["torch_ok"]:
         st.info("ℹ️ PyTorch not available — LSTM skipped. `pip install torch` to enable it.")
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Training samples", f"{lab['n_samples']:,}")
-    c2.metric("Held-out test set", f"{lab['n_test']:,}")
-    c3.metric("Assets", lab["n_tickers"])
+    # Re-aggregate everything for the selected assets (no retraining)
+    names = lab["model_names"]
+    rows = [r for r in lab["test_records"] if r["ticker"] in SELECTED]
+    leaderboard = compute_leaderboard(rows, names)
+    strat_dates, strategy, buyhold = compute_strategy(rows, names)
+    pred_vs_actual = compute_pred_vs_actual(rows, names)
+    all_selected = len(SELECTED) == lab["n_tickers"]
 
-    lb = pd.DataFrame(lab["leaderboard"])
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Test predictions", f"{len(rows):,}")
+    c2.metric("Assets shown", len(SELECTED))
+    c3.metric("Models", len(names))
+
+    lb = pd.DataFrame(leaderboard)
     winner = lb.iloc[0]
+    if not all_selected:
+        st.caption(f"📊 Metrics & charts reflect the {len(SELECTED)} selected asset(s). "
+                   "Select all to see the full-universe results.")
 
     # Leaderboard
     st.subheader("🏆 Leaderboard")
@@ -133,10 +166,10 @@ def page_models():
                 "holding everything (dashed). Above the dashed line = beat the market."
                 "</div>", unsafe_allow_html=True)
     fig = go.Figure()
-    for name, idx in lab["strategy"].items():
-        fig.add_trace(go.Scatter(x=lab["strategy_dates"], y=idx, mode="lines",
+    for name, idx in strategy.items():
+        fig.add_trace(go.Scatter(x=strat_dates, y=idx, mode="lines",
                                  name=name, line=dict(color=MC.get(name), width=2.5)))
-    fig.add_trace(go.Scatter(x=lab["strategy_dates"], y=lab["buyhold"], mode="lines",
+    fig.add_trace(go.Scatter(x=strat_dates, y=buyhold, mode="lines",
                              name="Buy & Hold", line=dict(color=MUTED, width=2, dash="dash")))
     fig.update_layout(title="Growth of $100 (held-out test period)",
                       yaxis_title="Index (start = 100)")
@@ -146,8 +179,8 @@ def page_models():
     st.subheader("🎯 Predicted vs. actual return")
     st.markdown("<div class='note'>Each dot is one test day. The tighter the cloud hugs "
                 "the diagonal, the better the prediction.</div>", unsafe_allow_html=True)
-    cols = st.columns(len(lab["pred_vs_actual"]))
-    for col, (name, pv) in zip(cols, lab["pred_vs_actual"].items()):
+    cols = st.columns(len(pred_vs_actual))
+    for col, (name, pv) in zip(cols, pred_vs_actual.items()):
         with col:
             a, p = np.array(pv["actual"]), np.array(pv["pred"])
             lim = float(max(np.abs(a).max(), np.abs(p).max())) * 1.05
@@ -185,7 +218,12 @@ def page_predictions():
     if not lab["ok"]:
         st.warning(f"⚠️ {lab['error']}")
         return
-    live = lab["live"]
+    if _need_assets():
+        return
+    live = lab["live"][lab["live"]["ticker"].isin(SELECTED)].reset_index(drop=True)
+    if live.empty:
+        st.info("No predictions for the selected assets.")
+        return
 
     c1, c2, c3 = st.columns(3)
     c1.metric("🟢 BUY", int((live["Signal"] == "BUY").sum()))
@@ -233,11 +271,14 @@ def page_sentiment():
                 "<b>−1 bearish</b> to <b>+1 bullish</b> (VADER + a finance word-list).</div>",
                 unsafe_allow_html=True)
 
+    if _need_assets():
+        return
     rows = [{"name": TICKER_NAMES.get(tk, tk), "sentiment": s.sentiment or 0.0,
              "title": s.title}
-            for s in session.query(Story).all() for tk in tickers_in_text(s.title or "")]
+            for s in session.query(Story).all()
+            for tk in tickers_in_text(s.title or "") if tk in SELECTED]
     if not rows:
-        st.info("No ticker-tagged headlines yet.")
+        st.info("No headlines for the selected assets.")
         return
     sdf = pd.DataFrame(rows)
 
