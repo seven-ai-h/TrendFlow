@@ -1,14 +1,14 @@
-# 🔥 TrendFlow - Real-Time Trend Detection System
+# TrendFlow - Real-Time Trend Detection System
 
 A multi-platform trend detection system that tracks and predicts emerging topics across Hacker News and major news outlets.
 
 ![Dashboard Preview](link-to-screenshot-here)
 
-## 🚀 Live Demo
+## Live Demo
 
 [View Live Dashboard](your-streamlit-url-here)
 
-## ✨ Features
+## Features
 
 - **Multi-Platform Data Collection**: Aggregates content from Hacker News and NewsAPI
 - **Intelligent Keyword Extraction**: NLP-powered keyword extraction with custom stopword filtering
@@ -18,7 +18,7 @@ A multi-platform trend detection system that tracks and predicts emerging topics
 - **Automated Pipeline**: Hourly data collection and processing
 - **Prediction Model**: ML-based prediction of trending topics (in development)
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 **Backend:**
 - Python 3.9+
