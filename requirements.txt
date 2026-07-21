@@ -6,3 +6,13 @@ requests
 python-dotenv
 nltk
 schedule
+scikit-learn
+numpy
+joblib
+anthropic
+feedparser
+spacy
+vaderSentiment
+yfinance
+scipy
+torch

@@ -1,0 +1,12 @@
+[theme]
+# Light, minimal theme — validated data-viz light palette.
+# Clean white surfaces, one blue accent, restrained ink.
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#f9f9f7"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#0b0b0b"
+font = "sans serif"
+
+[server]
+headless = true
