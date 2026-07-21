@@ -1,6 +1,6 @@
-# AlphaSignal
+# TrendSignal
 
-AlphaSignal is an end-to-end machine-learning pipeline that predicts the
+TrendSignal is an end-to-end machine-learning pipeline that predicts the
 **next-day return** of a small universe of technology equities and major
 cryptocurrencies from **news-headline sentiment** combined with price and
 market-context features. It benchmarks three model families on the same task
